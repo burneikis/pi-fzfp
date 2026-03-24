@@ -1,0 +1,17 @@
+{
+  "name": "pi-fzfp",
+  "version": "1.0.0",
+  "description": "Fuzzy file picker for pi – true subsequence matching for @file autocomplete",
+  "keywords": ["pi-package"],
+  "exports": {
+    ".": "./index.ts",
+    "./provider": "./provider.ts"
+  },
+  "pi": {
+    "extensions": ["./index.ts"]
+  },
+  "peerDependencies": {
+    "@mariozechner/pi-coding-agent": "*",
+    "@mariozechner/pi-tui": "*"
+  }
+}
