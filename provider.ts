@@ -14,7 +14,7 @@
  */
 
 import type { AutocompleteItem, AutocompleteProvider } from "@mariozechner/pi-tui";
-import { fuzzyFilter } from "@mariozechner/pi-tui";
+import { fuzzyFilter, fuzzyMatch } from "@mariozechner/pi-tui";
 import { spawnSync } from "node:child_process";
 import { basename } from "node:path";
 
@@ -30,10 +30,9 @@ function findFd(): string | null {
 }
 
 /** Use fd to list all files (respects .gitignore, excludes .git). */
-function getAllFiles(baseDir: string, fdPath: string, maxResults: number = 5000): { path: string; isDirectory: boolean }[] {
+function getAllFiles(baseDir: string, fdPath: string): { path: string; isDirectory: boolean }[] {
 	const args = [
 		"--base-directory", baseDir,
-		"--max-results", String(maxResults),
 		"--type", "f",
 		"--type", "d",
 		"--hidden",
@@ -129,9 +128,29 @@ export class FuzzyFileAutocompleteProvider implements AutocompleteProvider {
 		// Get all files from fd, then fuzzy-filter them
 		const allFiles = getAllFiles(this.basePath, this.fdPath);
 
-		// Apply fuzzy filter using pi-tui's built-in subsequence matcher.
-		// fuzzyFilter supports space-separated tokens, so "ap ban coc" also works.
-		const matched = fuzzyFilter(allFiles, rawQuery, (entry) => entry.path);
+		// If query contains '/', match against full path; otherwise match against
+		// the basename so that characters are enforced in order within the filename
+		// rather than being spread across unrelated directory segments.
+		const queryHasSlash = rawQuery.includes("/");
+
+		let matched: { path: string; isDirectory: boolean }[];
+		if (queryHasSlash) {
+			matched = fuzzyFilter(allFiles, rawQuery, (entry) => entry.path);
+		} else {
+			// Match against basename, then sort by basename score (with full-path score as tiebreaker)
+			const scored: { entry: { path: string; isDirectory: boolean }; score: number }[] = [];
+			for (const entry of allFiles) {
+				const name = basename(entry.isDirectory ? entry.path.slice(0, -1) : entry.path);
+				const m = fuzzyMatch(rawQuery, name);
+				if (m.matches) {
+					// Use full-path score as minor tiebreaker (prefer shorter paths)
+					const pathBonus = entry.path.length * 0.01;
+					scored.push({ entry, score: m.score + pathBonus });
+				}
+			}
+			scored.sort((a, b) => a.score - b.score);
+			matched = scored.map((s) => s.entry);
+		}
 
 		// Take top 20 results
 		const top = matched.slice(0, 20);
