@@ -30,15 +30,20 @@ pi install npm:@burneikis/pi-fzfp
 
 ### With pi-vim
 
-Use the [`fzfp` branch of pi-vim](https://github.com/burneikis/pi-vim/tree/fzfp), which includes pi-fzfp as a dependency:
+From the pi-vim README:
+```markdown
+### With Fuzzy File Picker (optional)
+
+To add the [pi-fzfp](https://github.com/burneikis/pi-fzfp) fuzzy file picker, install it into pi-vim's package directory:
 
 ```bash
-cd ~/.pi/agent/extensions/pi-vim
-git checkout fzfp
-npm install
+cd $(npm root -g)/@burneikis/pi-vim
+npm install @burneikis/pi-fzfp
 ```
 
-**Do not install pi-fzfp separately when using the pi-vim fzfp branch** — the fuzzy matching is built in.
+pi-vim detects pi-fzfp at startup and integrates it automatically.
+
+```
 
 ### With another custom editor extension
 
