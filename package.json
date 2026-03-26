@@ -1,6 +1,6 @@
 {
   "name": "@burneikis/pi-fzfp",
-  "version": "2.0.1",
+  "version": "2.0.2",
   "description": "Fuzzy file picker for pi – weighted dual-key matching for @file autocomplete",
   "license": "MIT",
   "author": "burneikis",
