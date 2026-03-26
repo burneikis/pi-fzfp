@@ -1,14 +1,18 @@
 {
-  "name": "pi-fzfp",
+  "name": "@burneikis/pi-fzfp",
   "version": "2.0.0",
   "description": "Fuzzy file picker for pi – weighted dual-key matching for @file autocomplete",
-  "keywords": ["pi-package"],
+  "keywords": [
+    "pi-package"
+  ],
   "exports": {
     ".": "./index.ts",
     "./provider": "./provider.ts"
   },
   "pi": {
-    "extensions": ["./index.ts"]
+    "extensions": [
+      "./index.ts"
+    ]
   },
   "peerDependencies": {
     "@mariozechner/pi-coding-agent": "*",
