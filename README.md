@@ -25,13 +25,7 @@ pi-fzfp wraps the autocomplete provider so that `@` queries use pi-tui's `fuzzyM
 ### Standalone (default editor)
 
 ```bash
-pi install git:github.com/burneikis/pi-fzfp
-```
-
-Or clone manually:
-
-```bash
-git clone https://github.com/burneikis/pi-fzfp ~/.pi/agent/extensions/pi-fzfp
+pi install npm:@burneikis/pi-fzfp
 ```
 
 ### With pi-vim
@@ -51,7 +45,7 @@ npm install
 Add pi-fzfp as a dependency and import the provider wrapper:
 
 ```bash
-npm install github:burneikis/pi-fzfp
+npm install @burneikis/pi-fzfp
 ```
 
 Then in your custom editor:
