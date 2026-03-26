@@ -25,18 +25,18 @@ pi-fzfp wraps the autocomplete provider so that `@` queries use pi-tui's `fuzzyM
 ### Standalone (default editor)
 
 ```bash
-pi install git:github.com/aburneikis/pi-fzfp
+pi install git:github.com/burneikis/pi-fzfp
 ```
 
 Or clone manually:
 
 ```bash
-git clone https://github.com/aburneikis/pi-fzfp ~/.pi/agent/extensions/pi-fzfp
+git clone https://github.com/burneikis/pi-fzfp ~/.pi/agent/extensions/pi-fzfp
 ```
 
 ### With pi-vim
 
-Use the [`fzfp` branch of pi-vim](https://github.com/aburneikis/pi-vim/tree/fzfp), which includes pi-fzfp as a dependency:
+Use the [`fzfp` branch of pi-vim](https://github.com/burneikis/pi-vim/tree/fzfp), which includes pi-fzfp as a dependency:
 
 ```bash
 cd ~/.pi/agent/extensions/pi-vim
@@ -51,7 +51,7 @@ npm install
 Add pi-fzfp as a dependency and import the provider wrapper:
 
 ```bash
-npm install github:aburneikis/pi-fzfp
+npm install github:burneikis/pi-fzfp
 ```
 
 Then in your custom editor:
