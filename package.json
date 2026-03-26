@@ -1,7 +1,7 @@
 {
   "name": "pi-fzfp",
-  "version": "1.0.0",
-  "description": "Fuzzy file picker for pi – true subsequence matching for @file autocomplete",
+  "version": "2.0.0",
+  "description": "Fuzzy file picker for pi – weighted dual-key matching for @file autocomplete",
   "keywords": ["pi-package"],
   "exports": {
     ".": "./index.ts",

@@ -1,10 +1,21 @@
 /**
  * FuzzyFileAutocompleteProvider - Reusable wrapper that enhances any
- * AutocompleteProvider with true subsequence fuzzy matching for @ file queries.
+ * AutocompleteProvider with weighted fuzzy matching for @ file queries.
+ *
+ * Scoring strategy:
+ *   - Each file is indexed with two keys: path (weight: 1) and basename (weight: 2)
+ *   - Basename matches are scored 2x higher than full-path matches
+ *   - Suffix alignment bonus: when the end of the query matches the end of the
+ *     filename, each aligned character adds a bonus — so "acts" prefers "abct.ts"
+ *     over "abct.scss" because "ts" aligns with the extension
+ *   - If query contains "/" and is longer than 2 chars, pre-filters to files
+ *     whose path prefix matches the query prefix up to the last "/"
+ *   - Results sorted by weighted score (lower = better), with a penalty for
+ *     files containing "test" in their path as a tiebreaker
  *
  * Import and use in any custom editor:
  *
- *   import { wrapWithFuzzyFiles } from "~/tools/fuzzy-file-picker/provider.js";
+ *   import { wrapWithFuzzyFiles } from "pi-fzfp/provider";
  *
  *   class MyEditor extends CustomEditor {
  *     override setAutocompleteProvider(provider: AutocompleteProvider) {
@@ -14,7 +25,7 @@
  */
 
 import type { AutocompleteItem, AutocompleteProvider } from "@mariozechner/pi-tui";
-import { fuzzyFilter, fuzzyMatch } from "@mariozechner/pi-tui";
+import { fuzzyMatch } from "@mariozechner/pi-tui";
 import { spawnSync } from "node:child_process";
 import { basename } from "node:path";
 
@@ -29,8 +40,14 @@ function findFd(): string | null {
 	return null;
 }
 
+interface FileEntry {
+	path: string;
+	name: string;
+	isDirectory: boolean;
+}
+
 /** Use fd to list all files (respects .gitignore, excludes .git). */
-function getAllFiles(baseDir: string, fdPath: string): { path: string; isDirectory: boolean }[] {
+function getAllFiles(baseDir: string, fdPath: string): FileEntry[] {
 	const args = [
 		"--base-directory", baseDir,
 		"--type", "f",
@@ -47,14 +64,18 @@ function getAllFiles(baseDir: string, fdPath: string): { path: string; isDirecto
 
 	if (result.status !== 0 || !result.stdout) return [];
 
-	const entries: { path: string; isDirectory: boolean }[] = [];
+	const entries: FileEntry[] = [];
 	for (const line of result.stdout.trim().split("\n")) {
 		if (!line) continue;
 		const displayPath = line.replace(/\\/g, "/");
 		const isDir = displayPath.endsWith("/");
 		const normalizedPath = isDir ? displayPath.slice(0, -1) : displayPath;
 		if (normalizedPath === ".git" || normalizedPath.startsWith(".git/") || normalizedPath.includes("/.git/")) continue;
-		entries.push({ path: displayPath, isDirectory: isDir });
+		entries.push({
+			path: displayPath,
+			name: basename(normalizedPath),
+			isDirectory: isDir,
+		});
 	}
 	return entries;
 }
@@ -91,9 +112,88 @@ function extractAtPrefix(text: string): string | null {
 	return null;
 }
 
+/** Small penalty added to the sort score for files with "test" in their path. */
+const TEST_PENALTY = 0.001;
+
+/** Weight for basename key (2x path weight). */
+const BASENAME_WEIGHT = 2;
+/** Weight for full path key. */
+const PATH_WEIGHT = 1;
+
+/**
+ * Bonus per character of contiguous suffix alignment between query and target.
+ * When the tail of the query matches the tail of the filename, this rewards
+ * extension-aware matches: "acts" → "abct.ts" beats "abct.scss" because "ts"
+ * aligns at the end (2 chars × bonus) vs only "s" (1 char × bonus).
+ */
+const SUFFIX_BONUS = 15;
+
+/**
+ * Count how many characters at the end of `query` match contiguously
+ * at the end of `target` (case-insensitive).
+ */
+function suffixMatchLen(query: string, target: string): number {
+	let qi = query.length - 1;
+	let ti = target.length - 1;
+	let count = 0;
+	while (qi >= 0 && ti >= 0) {
+		if (query[qi]!.toLowerCase() === target[ti]!.toLowerCase()) {
+			count++;
+			qi--;
+			ti--;
+		} else {
+			break;
+		}
+	}
+	return count;
+}
+
+/**
+ * Score a file entry against a query using weighted dual-key matching.
+ *
+ * Each file is matched against two keys:
+ *   - basename (weight: 2) — filename matches count double
+ *   - full path (weight: 1) — still searchable but lower priority
+ *
+ * Additionally, a suffix alignment bonus is applied to basename matches
+ * to prefer files whose extension aligns with the query tail.
+ *
+ * Returns the best (lowest) weighted score, or null if no match.
+ * fuzzyMatch scores are negative (more negative = better), so we
+ * divide by weight to make weighted matches "more negative" (better).
+ */
+function scoreEntry(query: string, entry: FileEntry): number | null {
+	const nameTarget = entry.name;
+	const pathTarget = entry.isDirectory ? entry.path.slice(0, -1) : entry.path;
+
+	const nameMatch = fuzzyMatch(query, nameTarget);
+	const pathMatch = fuzzyMatch(query, pathTarget);
+
+	let bestScore: number | null = null;
+
+	if (nameMatch.matches) {
+		const sml = suffixMatchLen(query, nameTarget);
+		const weighted = (nameMatch.score - sml * SUFFIX_BONUS) / BASENAME_WEIGHT;
+		if (bestScore === null || weighted < bestScore) {
+			bestScore = weighted;
+		}
+	}
+
+	if (pathMatch.matches) {
+		const sml = suffixMatchLen(query, pathTarget);
+		const weighted = (pathMatch.score - sml * SUFFIX_BONUS) / PATH_WEIGHT;
+		if (bestScore === null || weighted < bestScore) {
+			bestScore = weighted;
+		}
+	}
+
+	return bestScore;
+}
+
 /**
  * Wraps an existing AutocompleteProvider to enhance @ file matching
- * with true fuzzy/subsequence matching via pi-tui's fuzzyFilter.
+ * with weighted fuzzy matching. Each file is scored on both its full path
+ * (weight 1) and its basename (weight 2), so basename matches rank higher.
  */
 export class FuzzyFileAutocompleteProvider implements AutocompleteProvider {
 	private inner: AutocompleteProvider;
@@ -125,37 +225,59 @@ export class FuzzyFileAutocompleteProvider implements AutocompleteProvider {
 			return this.inner.getSuggestions(lines, cursorLine, cursorCol);
 		}
 
-		// Get all files from fd, then fuzzy-filter them
-		const allFiles = getAllFiles(this.basePath, this.fdPath);
+		// Get all files from fd
+		let allFiles = getAllFiles(this.basePath, this.fdPath);
 
-		// If query contains '/', match against full path; otherwise match against
-		// the basename so that characters are enforced in order within the filename
-		// rather than being spread across unrelated directory segments.
-		const queryHasSlash = rawQuery.includes("/");
+		// --- Path prefix pre-filtering ---
+		// If query contains "/" and is longer than 2 chars, pre-filter to files
+		// whose path prefix matches the query's prefix up to the last "/".
+		const lastSlash = rawQuery.lastIndexOf("/");
+		const queryHasSlash = lastSlash !== -1;
+		let searchQuery = rawQuery;
 
-		let matched: { path: string; isDirectory: boolean }[];
-		if (queryHasSlash) {
-			matched = fuzzyFilter(allFiles, rawQuery, (entry) => entry.path);
-		} else {
-			// Match against basename, then sort by basename score (with full-path score as tiebreaker)
-			const scored: { entry: { path: string; isDirectory: boolean }; score: number }[] = [];
-			for (const entry of allFiles) {
-				const name = basename(entry.isDirectory ? entry.path.slice(0, -1) : entry.path);
-				const m = fuzzyMatch(rawQuery, name);
-				if (m.matches) {
-					// Use full-path score as minor tiebreaker (prefer shorter paths)
-					const pathBonus = entry.path.length * 0.01;
-					scored.push({ entry, score: m.score + pathBonus });
-				}
+		if (queryHasSlash && rawQuery.length > 2) {
+			const queryPrefix = rawQuery.slice(0, lastSlash + 1); // e.g. "src/components/"
+			allFiles = allFiles.filter((entry) => {
+				const entryPath = entry.path.toLowerCase();
+				return entryPath.startsWith(queryPrefix.toLowerCase());
+			});
+			// Search with just the part after the last slash
+			searchQuery = rawQuery.slice(lastSlash + 1);
+			// If the remainder is empty, show all files in that directory prefix
+			if (!searchQuery) {
+				const top = allFiles.slice(0, 20);
+				return this.buildSuggestions(top, atPrefix, isQuoted);
 			}
-			scored.sort((a, b) => a.score - b.score);
-			matched = scored.map((s) => s.entry);
 		}
 
-		// Take top 20 results
-		const top = matched.slice(0, 20);
+		// --- Weighted fuzzy scoring ---
+		const scored: { entry: FileEntry; sortScore: number }[] = [];
+		for (const entry of allFiles) {
+			const score = scoreEntry(searchQuery, entry);
+			if (score !== null) {
+				const hasTest = /test/i.test(entry.path);
+				scored.push({
+					entry,
+					sortScore: score + (hasTest ? TEST_PENALTY : 0),
+				});
+			}
+		}
 
-		const suggestions: AutocompleteItem[] = top.map((entry) => {
+		// Sort by score (lower = better)
+		scored.sort((a, b) => a.sortScore - b.sortScore);
+
+		// Take top 20 results
+		const top = scored.slice(0, 20).map((s) => s.entry);
+
+		return this.buildSuggestions(top, atPrefix, isQuoted);
+	}
+
+	private buildSuggestions(
+		entries: FileEntry[],
+		atPrefix: string,
+		isQuoted: boolean,
+	): { items: AutocompleteItem[]; prefix: string } | null {
+		const suggestions: AutocompleteItem[] = entries.map((entry) => {
 			const pathWithoutSlash = entry.isDirectory ? entry.path.slice(0, -1) : entry.path;
 			const displayPath = pathWithoutSlash;
 			const entryName = basename(pathWithoutSlash);
