@@ -265,19 +265,16 @@ export class FuzzyFileAutocompleteProvider implements AutocompleteProvider {
 
 		// --- Weighted fuzzy scoring ---
 		const scored: { entry: FileEntry; sortScore: number }[] = [];
-		const basenameQuery = queryHasSlash ? rawQuery.slice(lastSlash + 1) : null;
 		for (const entry of allFiles) {
 			let bestScore: number | null;
 
 			if (queryHasSlash) {
-				// When query has "/", score full query against full path,
-				// and also score the part after "/" against basename
-				const fullScore = scoreEntryPath(rawQuery, entry);
-				const bnScore = basenameQuery ? scoreEntry(basenameQuery, entry) : null;
-				bestScore = fullScore;
-				if (bnScore !== null && (bestScore === null || bnScore < bestScore)) bestScore = bnScore;
+				// When query has "/", only match the full query against the
+				// full path — no basename-only fallback, which would pull in
+				// unrelated files from other directories.
+				bestScore = scoreEntryPath(rawQuery, entry);
 			} else {
-				// No slash: original dual-key scoring
+				// No slash: original dual-key scoring (basename + path)
 				bestScore = scoreEntry(rawQuery, entry);
 			}
 
