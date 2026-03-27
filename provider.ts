@@ -8,8 +8,8 @@
  *   - Suffix alignment bonus: when the end of the query matches the end of the
  *     filename, each aligned character adds a bonus — so "acts" prefers "abct.ts"
  *     over "abct.scss" because "ts" aligns with the extension
- *   - If query contains "/" and is longer than 2 chars, pre-filters to files
- *     whose path prefix matches the query prefix up to the last "/"
+ *   - If query contains "/", fuzzy-matches the full query against full paths
+ *     so nested directories work (e.g. "abc/agts" finds "src/abc/abceg.ts")
  *   - Results sorted by weighted score (lower = better), with a penalty for
  *     files containing "test" in their path as a tiebreaker
  *
@@ -149,6 +149,18 @@ function suffixMatchLen(query: string, target: string): number {
 }
 
 /**
+ * Score a file entry by fuzzy-matching the full query (which may contain "/")
+ * against the full path only. Used when the query includes directory separators.
+ */
+function scoreEntryPath(query: string, entry: FileEntry): number | null {
+	const pathTarget = entry.isDirectory ? entry.path.slice(0, -1) : entry.path;
+	const pathMatch = fuzzyMatch(query, pathTarget);
+	if (!pathMatch.matches) return null;
+	const sml = suffixMatchLen(query, pathTarget);
+	return (pathMatch.score - sml * SUFFIX_BONUS) / PATH_WEIGHT;
+}
+
+/**
  * Score a file entry against a query using weighted dual-key matching.
  *
  * Each file is matched against two keys:
@@ -229,36 +241,51 @@ export class FuzzyFileAutocompleteProvider implements AutocompleteProvider {
 		let allFiles = getAllFiles(this.basePath, this.fdPath);
 
 		// --- Path prefix pre-filtering ---
-		// If query contains "/" and is longer than 2 chars, pre-filter to files
-		// whose path prefix matches the query's prefix up to the last "/".
+		// If query ends with "/" exactly, show all files under matching directories.
+		// Otherwise, if query contains "/", fuzzy-match the full query against
+		// the full path so nested directories work (e.g. "abc/agts" matches
+		// "src/abc/abceg.ts").
 		const lastSlash = rawQuery.lastIndexOf("/");
 		const queryHasSlash = lastSlash !== -1;
-		let searchQuery = rawQuery;
 
 		if (queryHasSlash && rawQuery.length > 2) {
-			const queryPrefix = rawQuery.slice(0, lastSlash + 1); // e.g. "src/components/"
-			allFiles = allFiles.filter((entry) => {
-				const entryPath = entry.path.toLowerCase();
-				return entryPath.startsWith(queryPrefix.toLowerCase());
-			});
-			// Search with just the part after the last slash
-			searchQuery = rawQuery.slice(lastSlash + 1);
-			// If the remainder is empty, show all files in that directory prefix
-			if (!searchQuery) {
+			// If query ends with "/" (user typed a dir prefix), show directory contents
+			const afterSlash = rawQuery.slice(lastSlash + 1);
+			if (!afterSlash) {
+				const queryPrefix = rawQuery.toLowerCase();
+				allFiles = allFiles.filter((entry) => {
+					return entry.path.toLowerCase().includes(queryPrefix);
+				});
 				const top = allFiles.slice(0, 20);
 				return this.buildSuggestions(top, atPrefix, isQuoted);
 			}
+			// Otherwise, keep searchQuery as the full rawQuery for path matching,
+			// but also try the basename-only portion for basename matching.
 		}
 
 		// --- Weighted fuzzy scoring ---
 		const scored: { entry: FileEntry; sortScore: number }[] = [];
+		const basenameQuery = queryHasSlash ? rawQuery.slice(lastSlash + 1) : null;
 		for (const entry of allFiles) {
-			const score = scoreEntry(searchQuery, entry);
-			if (score !== null) {
+			let bestScore: number | null;
+
+			if (queryHasSlash) {
+				// When query has "/", score full query against full path,
+				// and also score the part after "/" against basename
+				const fullScore = scoreEntryPath(rawQuery, entry);
+				const bnScore = basenameQuery ? scoreEntry(basenameQuery, entry) : null;
+				bestScore = fullScore;
+				if (bnScore !== null && (bestScore === null || bnScore < bestScore)) bestScore = bnScore;
+			} else {
+				// No slash: original dual-key scoring
+				bestScore = scoreEntry(rawQuery, entry);
+			}
+
+			if (bestScore !== null) {
 				const hasTest = /test/i.test(entry.path);
 				scored.push({
 					entry,
-					sortScore: score + (hasTest ? TEST_PENALTY : 0),
+					sortScore: bestScore + (hasTest ? TEST_PENALTY : 0),
 				});
 			}
 		}
