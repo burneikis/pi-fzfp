@@ -206,14 +206,14 @@ export class FuzzyFileAutocompleteProvider implements AutocompleteProvider {
 		this.fdPath = fdPath;
 	}
 
-	getSuggestions(lines: string[], cursorLine: number, cursorCol: number) {
+	getSuggestions(lines: string[], cursorLine: number, cursorCol: number, options?: any) {
 		const currentLine = lines[cursorLine] || "";
 		const textBeforeCursor = currentLine.slice(0, cursorCol);
 
 		// Only intercept @ file queries
 		const atPrefix = extractAtPrefix(textBeforeCursor);
 		if (!atPrefix || !this.fdPath) {
-			return this.inner.getSuggestions(lines, cursorLine, cursorCol);
+			return this.inner.getSuggestions(lines, cursorLine, cursorCol, options);
 		}
 
 		// Parse the raw query after @
@@ -222,7 +222,7 @@ export class FuzzyFileAutocompleteProvider implements AutocompleteProvider {
 
 		// If query is empty, let the original handler deal with it
 		if (!rawQuery) {
-			return this.inner.getSuggestions(lines, cursorLine, cursorCol);
+			return this.inner.getSuggestions(lines, cursorLine, cursorCol, options);
 		}
 
 		// Get all files from fd
