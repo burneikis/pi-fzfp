@@ -63,40 +63,31 @@ function extractAtPrefix(text: string): string | null {
 	return null;
 }
 
+/** Shell-escape a string for single-quoted context. */
+function shellEscape(s: string): string {
+	return s.replace(/'/g, "'\\''");
+}
+
 /**
- * Run fd piped into fzf --filter to get fuzzy-matched file results.
+ * Run fd piped into fzf --filter via a shell pipe.
+ * This avoids buffering fd's entire output in Node — important for large
+ * directories like ~ where fd can produce hundreds of MBs.
  * Returns paths sorted by fzf's scoring (best match first).
  */
 function fzfFilter(query: string, baseDir: string, fdPath: string, fzfPath: string): string[] {
-	// Run fd to list all files and directories
-	const fdArgs = [
-		"--base-directory", baseDir,
-		"--type", "f",
-		"--type", "d",
-		"--hidden",
-		"--exclude", ".git",
-	];
+	const cmd = `'${shellEscape(fdPath)}' --base-directory '${shellEscape(baseDir)}' --type f --type d --hidden --exclude .git | '${shellEscape(fzfPath)}' --filter '${shellEscape(query)}'`;
 
-	const fdResult = spawnSync(fdPath, fdArgs, {
+	const result = spawnSync("sh", ["-c", cmd], {
 		encoding: "utf-8",
 		stdio: ["pipe", "pipe", "pipe"],
 		maxBuffer: 10 * 1024 * 1024,
 	});
 
-	if (fdResult.status !== 0 || !fdResult.stdout) return [];
+	// fzf --filter exits 0 on matches, 1 on no matches;
+	// the pipe means sh returns fzf's exit code
+	if (!result.stdout) return [];
 
-	// Pipe fd output into fzf --filter for non-interactive fuzzy matching
-	const fzfResult = spawnSync(fzfPath, ["--filter", query], {
-		input: fdResult.stdout,
-		encoding: "utf-8",
-		stdio: ["pipe", "pipe", "pipe"],
-		maxBuffer: 10 * 1024 * 1024,
-	});
-
-	// fzf --filter exits 0 on matches, 1 on no matches
-	if (!fzfResult.stdout) return [];
-
-	return fzfResult.stdout.trim().split("\n").filter(Boolean);
+	return result.stdout.trim().split("\n").filter(Boolean);
 }
 
 /**
@@ -138,10 +129,7 @@ export class FzfFileAutocompleteProvider implements AutocompleteProvider {
 		// Use fzf --filter for fuzzy matching
 		const matches = fzfFilter(rawQuery, this.basePath, this.fdPath, this.fzfPath);
 
-		// Take top 20 results
-		const top = matches.slice(0, 20);
-
-		return this.buildSuggestions(top, atPrefix, isQuoted);
+		return this.buildSuggestions(matches, atPrefix, isQuoted);
 	}
 
 	private buildSuggestions(

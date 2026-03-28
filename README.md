@@ -76,6 +76,6 @@ The wrapper class, if you need more control.
 1. Intercepts `@` queries in the autocomplete provider
 2. Runs `fd` to list all project files (respects `.gitignore`, excludes `.git`)
 3. Pipes the file list through `fzf --filter=<query>` for fuzzy matching and scoring
-4. Takes the top 20 results (already sorted by fzf's score)
+4. Returns all matches sorted by fzf's score (no artificial limit)
 5. Builds autocomplete suggestions with proper `@` prefix and quoting
 6. Non-`@` queries pass through to the original provider unchanged
