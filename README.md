@@ -1,6 +1,6 @@
 # pi-fzfp
 
-Fuzzy file picker for [pi](https://github.com/badlogic/pi-mono/tree/main/packages/coding-agent). Replaces the built-in `@` file autocomplete with weighted dual-key fuzzy matching.
+Fuzzy file picker for [pi](https://github.com/badlogic/pi-mono/tree/main/packages/coding-agent). Replaces the built-in `@` file autocomplete with fzf-powered fuzzy matching.
 
 ## The Problem
 
@@ -8,17 +8,7 @@ Pi's built-in `@file` autocomplete uses `fd` with a regex pattern and substring 
 
 ## The Fix
 
-pi-fzfp wraps the autocomplete provider so that `@` queries use pi-tui's `fuzzyMatch` (true subsequence matching) with a **weighted dual-key scoring** strategy:
-
-- **Basename** (weight: 2) — filename matches are scored 2× higher than path matches
-- **Full path** (weight: 1) — still searchable, but lower priority
-- **Suffix alignment bonus** — when the end of your query matches the end of the filename, each aligned character adds a score bonus. So `@acts` prefers `abct.ts` over `abct.scss` because `ts` aligns with the extension (2 chars) vs only `s` (1 char).
-
-### Additional scoring features
-
-- **Path prefix pre-filtering**: If your query contains `/` and is longer than 2 chars, only files whose path starts with the query prefix (up to the last `/`) are searched
-- **Test file penalty**: Files with "test" in their path are penalized slightly as a tiebreaker
-- **True subsequence matching**: Characters must appear in order but don't need to be consecutive
+pi-fzfp pipes `fd` output through `fzf --filter` for true subsequence fuzzy matching, scored and sorted by fzf's battle-tested algorithm. No custom scoring — just fzf.
 
 ## Install
 
@@ -69,26 +59,23 @@ class MyEditor extends CustomEditor {
 ## Requirements
 
 - [`fd`](https://github.com/sharkdp/fd) must be installed and on `PATH`
+- [`fzf`](https://github.com/junegunn/fzf) must be installed and on `PATH`
 
 ## API
 
 ### `wrapWithFuzzyFiles(provider, basePath?)`
 
-Wraps any `AutocompleteProvider` with weighted fuzzy file matching for `@` queries. Returns the provider unchanged if `fd` is not available.
+Wraps any `AutocompleteProvider` with fzf-powered fuzzy file matching for `@` queries. Returns the provider unchanged if `fd` or `fzf` is not available.
 
-### `FuzzyFileAutocompleteProvider`
+### `FzfFileAutocompleteProvider`
 
 The wrapper class, if you need more control.
 
 ## How It Works
 
 1. Intercepts `@` queries in the autocomplete provider
-2. Runs `fd` to list all project files (respects `.gitignore`)
-3. If the query contains `/` and is >2 chars, pre-filters to files matching the path prefix
-4. Scores each file against two keys using `fuzzyMatch`:
-   - `name` (basename) with weight 2 — basename matches rank higher
-   - `path` (full path) with weight 1
-5. Applies a suffix alignment bonus — contiguous matching characters at the end of the query/filename boost the score
-6. Applies a small penalty for files with "test" in their path
-7. Sorts by score and returns the top 20 results
-8. Non-`@` queries (slash commands, tab path completion) pass through unchanged
+2. Runs `fd` to list all project files (respects `.gitignore`, excludes `.git`)
+3. Pipes the file list through `fzf --filter=<query>` for fuzzy matching and scoring
+4. Takes the top 20 results (already sorted by fzf's score)
+5. Builds autocomplete suggestions with proper `@` prefix and quoting
+6. Non-`@` queries pass through to the original provider unchanged

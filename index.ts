@@ -1,7 +1,7 @@
 /**
- * Fuzzy File Picker Extension
+ * Fuzzy File Picker Extension (fzf-powered)
  *
- * Enhances pi's @file autocomplete with true subsequence fuzzy matching.
+ * Enhances pi's @file autocomplete using fd + fzf --filter.
  *
  * ## Standalone mode (no custom editor extension):
  *   pi -e ~/tools/fuzzy-file-picker/index.ts

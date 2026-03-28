@@ -1,17 +1,9 @@
 /**
- * FuzzyFileAutocompleteProvider - Reusable wrapper that enhances any
- * AutocompleteProvider with weighted fuzzy matching for @ file queries.
+ * FzfFileAutocompleteProvider - Wraps any AutocompleteProvider with fzf-powered
+ * fuzzy matching for @ file queries.
  *
- * Scoring strategy:
- *   - Each file is indexed with two keys: path (weight: 1) and basename (weight: 2)
- *   - Basename matches are scored 2x higher than full-path matches
- *   - Suffix alignment bonus: when the end of the query matches the end of the
- *     filename, each aligned character adds a bonus — so "acts" prefers "abct.ts"
- *     over "abct.scss" because "ts" aligns with the extension
- *   - If query contains "/", fuzzy-matches the full query against full paths
- *     so nested directories work (e.g. "abc/agts" finds "src/abc/abceg.ts")
- *   - Results sorted by weighted score (lower = better), with a penalty for
- *     files containing "test" in their path as a tiebreaker
+ * Uses `fd` to list files and `fzf --filter` for non-interactive fuzzy matching
+ * and scoring. No custom scoring logic — just fzf.
  *
  * Import and use in any custom editor:
  *
@@ -25,59 +17,18 @@
  */
 
 import type { AutocompleteItem, AutocompleteProvider } from "@mariozechner/pi-tui";
-import { fuzzyMatch } from "@mariozechner/pi-tui";
 import { spawnSync } from "node:child_process";
 import { basename } from "node:path";
 
-/** Find the fd binary path. */
-function findFd(): string | null {
-	for (const name of ["fd", "fdfind"]) {
+/** Find a binary on PATH. */
+function findBinary(names: string[]): string | null {
+	for (const name of names) {
 		const result = spawnSync("which", [name], { encoding: "utf-8", stdio: ["pipe", "pipe", "pipe"] });
 		if (result.status === 0 && result.stdout.trim()) {
 			return result.stdout.trim();
 		}
 	}
 	return null;
-}
-
-interface FileEntry {
-	path: string;
-	name: string;
-	isDirectory: boolean;
-}
-
-/** Use fd to list all files (respects .gitignore, excludes .git). */
-function getAllFiles(baseDir: string, fdPath: string): FileEntry[] {
-	const args = [
-		"--base-directory", baseDir,
-		"--type", "f",
-		"--type", "d",
-		"--hidden",
-		"--exclude", ".git",
-	];
-
-	const result = spawnSync(fdPath, args, {
-		encoding: "utf-8",
-		stdio: ["pipe", "pipe", "pipe"],
-		maxBuffer: 10 * 1024 * 1024,
-	});
-
-	if (result.status !== 0 || !result.stdout) return [];
-
-	const entries: FileEntry[] = [];
-	for (const line of result.stdout.trim().split("\n")) {
-		if (!line) continue;
-		const displayPath = line.replace(/\\/g, "/");
-		const isDir = displayPath.endsWith("/");
-		const normalizedPath = isDir ? displayPath.slice(0, -1) : displayPath;
-		if (normalizedPath === ".git" || normalizedPath.startsWith(".git/") || normalizedPath.includes("/.git/")) continue;
-		entries.push({
-			path: displayPath,
-			name: basename(normalizedPath),
-			isDirectory: isDir,
-		});
-	}
-	return entries;
 }
 
 const PATH_DELIMITERS = new Set([" ", "\t", '"', "'"]);
@@ -112,110 +63,57 @@ function extractAtPrefix(text: string): string | null {
 	return null;
 }
 
-/** Small penalty added to the sort score for files with "test" in their path. */
-const TEST_PENALTY = 0.001;
-
-/** Weight for basename key (2x path weight). */
-const BASENAME_WEIGHT = 2;
-/** Weight for full path key. */
-const PATH_WEIGHT = 1;
-
 /**
- * Bonus per character of contiguous suffix alignment between query and target.
- * When the tail of the query matches the tail of the filename, this rewards
- * extension-aware matches: "acts" → "abct.ts" beats "abct.scss" because "ts"
- * aligns at the end (2 chars × bonus) vs only "s" (1 char × bonus).
+ * Run fd piped into fzf --filter to get fuzzy-matched file results.
+ * Returns paths sorted by fzf's scoring (best match first).
  */
-const SUFFIX_BONUS = 15;
+function fzfFilter(query: string, baseDir: string, fdPath: string, fzfPath: string): string[] {
+	// Run fd to list all files and directories
+	const fdArgs = [
+		"--base-directory", baseDir,
+		"--type", "f",
+		"--type", "d",
+		"--hidden",
+		"--exclude", ".git",
+	];
 
-/**
- * Count how many characters at the end of `query` match contiguously
- * at the end of `target` (case-insensitive).
- */
-function suffixMatchLen(query: string, target: string): number {
-	let qi = query.length - 1;
-	let ti = target.length - 1;
-	let count = 0;
-	while (qi >= 0 && ti >= 0) {
-		if (query[qi]!.toLowerCase() === target[ti]!.toLowerCase()) {
-			count++;
-			qi--;
-			ti--;
-		} else {
-			break;
-		}
-	}
-	return count;
-}
+	const fdResult = spawnSync(fdPath, fdArgs, {
+		encoding: "utf-8",
+		stdio: ["pipe", "pipe", "pipe"],
+		maxBuffer: 10 * 1024 * 1024,
+	});
 
-/**
- * Score a file entry by fuzzy-matching the full query (which may contain "/")
- * against the full path only. Used when the query includes directory separators.
- */
-function scoreEntryPath(query: string, entry: FileEntry): number | null {
-	const pathTarget = entry.isDirectory ? entry.path.slice(0, -1) : entry.path;
-	const pathMatch = fuzzyMatch(query, pathTarget);
-	if (!pathMatch.matches) return null;
-	const sml = suffixMatchLen(query, pathTarget);
-	return (pathMatch.score - sml * SUFFIX_BONUS) / PATH_WEIGHT;
-}
+	if (fdResult.status !== 0 || !fdResult.stdout) return [];
 
-/**
- * Score a file entry against a query using weighted dual-key matching.
- *
- * Each file is matched against two keys:
- *   - basename (weight: 2) — filename matches count double
- *   - full path (weight: 1) — still searchable but lower priority
- *
- * Additionally, a suffix alignment bonus is applied to basename matches
- * to prefer files whose extension aligns with the query tail.
- *
- * Returns the best (lowest) weighted score, or null if no match.
- * fuzzyMatch scores are negative (more negative = better), so we
- * divide by weight to make weighted matches "more negative" (better).
- */
-function scoreEntry(query: string, entry: FileEntry): number | null {
-	const nameTarget = entry.name;
-	const pathTarget = entry.isDirectory ? entry.path.slice(0, -1) : entry.path;
+	// Pipe fd output into fzf --filter for non-interactive fuzzy matching
+	const fzfResult = spawnSync(fzfPath, ["--filter", query], {
+		input: fdResult.stdout,
+		encoding: "utf-8",
+		stdio: ["pipe", "pipe", "pipe"],
+		maxBuffer: 10 * 1024 * 1024,
+	});
 
-	const nameMatch = fuzzyMatch(query, nameTarget);
-	const pathMatch = fuzzyMatch(query, pathTarget);
+	// fzf --filter exits 0 on matches, 1 on no matches
+	if (!fzfResult.stdout) return [];
 
-	let bestScore: number | null = null;
-
-	if (nameMatch.matches) {
-		const sml = suffixMatchLen(query, nameTarget);
-		const weighted = (nameMatch.score - sml * SUFFIX_BONUS) / BASENAME_WEIGHT;
-		if (bestScore === null || weighted < bestScore) {
-			bestScore = weighted;
-		}
-	}
-
-	if (pathMatch.matches) {
-		const sml = suffixMatchLen(query, pathTarget);
-		const weighted = (pathMatch.score - sml * SUFFIX_BONUS) / PATH_WEIGHT;
-		if (bestScore === null || weighted < bestScore) {
-			bestScore = weighted;
-		}
-	}
-
-	return bestScore;
+	return fzfResult.stdout.trim().split("\n").filter(Boolean);
 }
 
 /**
  * Wraps an existing AutocompleteProvider to enhance @ file matching
- * with weighted fuzzy matching. Each file is scored on both its full path
- * (weight 1) and its basename (weight 2), so basename matches rank higher.
+ * with fzf-powered fuzzy matching.
  */
-export class FuzzyFileAutocompleteProvider implements AutocompleteProvider {
+export class FzfFileAutocompleteProvider implements AutocompleteProvider {
 	private inner: AutocompleteProvider;
 	private basePath: string;
-	private fdPath: string | null;
+	private fdPath: string;
+	private fzfPath: string;
 
-	constructor(inner: AutocompleteProvider, basePath: string, fdPath: string | null) {
+	constructor(inner: AutocompleteProvider, basePath: string, fdPath: string, fzfPath: string) {
 		this.inner = inner;
 		this.basePath = basePath;
 		this.fdPath = fdPath;
+		this.fzfPath = fzfPath;
 	}
 
 	getSuggestions(lines: string[], cursorLine: number, cursorCol: number, options?: any) {
@@ -224,7 +122,7 @@ export class FuzzyFileAutocompleteProvider implements AutocompleteProvider {
 
 		// Only intercept @ file queries
 		const atPrefix = extractAtPrefix(textBeforeCursor);
-		if (!atPrefix || !this.fdPath) {
+		if (!atPrefix) {
 			return this.inner.getSuggestions(lines, cursorLine, cursorCol, options);
 		}
 
@@ -237,77 +135,27 @@ export class FuzzyFileAutocompleteProvider implements AutocompleteProvider {
 			return this.inner.getSuggestions(lines, cursorLine, cursorCol, options);
 		}
 
-		// Get all files from fd
-		let allFiles = getAllFiles(this.basePath, this.fdPath);
-
-		// --- Path prefix pre-filtering ---
-		// If query ends with "/" exactly, show all files under matching directories.
-		// Otherwise, if query contains "/", fuzzy-match the full query against
-		// the full path so nested directories work (e.g. "abc/agts" matches
-		// "src/abc/abceg.ts").
-		const lastSlash = rawQuery.lastIndexOf("/");
-		const queryHasSlash = lastSlash !== -1;
-
-		if (queryHasSlash && rawQuery.length > 2) {
-			// If query ends with "/" (user typed a dir prefix), show directory contents
-			const afterSlash = rawQuery.slice(lastSlash + 1);
-			if (!afterSlash) {
-				const queryPrefix = rawQuery.toLowerCase();
-				allFiles = allFiles.filter((entry) => {
-					return entry.path.toLowerCase().includes(queryPrefix);
-				});
-				const top = allFiles.slice(0, 20);
-				return this.buildSuggestions(top, atPrefix, isQuoted);
-			}
-			// Otherwise, keep searchQuery as the full rawQuery for path matching,
-			// but also try the basename-only portion for basename matching.
-		}
-
-		// --- Weighted fuzzy scoring ---
-		const scored: { entry: FileEntry; sortScore: number }[] = [];
-		for (const entry of allFiles) {
-			let bestScore: number | null;
-
-			if (queryHasSlash) {
-				// When query has "/", only match the full query against the
-				// full path — no basename-only fallback, which would pull in
-				// unrelated files from other directories.
-				bestScore = scoreEntryPath(rawQuery, entry);
-			} else {
-				// No slash: original dual-key scoring (basename + path)
-				bestScore = scoreEntry(rawQuery, entry);
-			}
-
-			if (bestScore !== null) {
-				const hasTest = /test/i.test(entry.path);
-				scored.push({
-					entry,
-					sortScore: bestScore + (hasTest ? TEST_PENALTY : 0),
-				});
-			}
-		}
-
-		// Sort by score (lower = better)
-		scored.sort((a, b) => a.sortScore - b.sortScore);
+		// Use fzf --filter for fuzzy matching
+		const matches = fzfFilter(rawQuery, this.basePath, this.fdPath, this.fzfPath);
 
 		// Take top 20 results
-		const top = scored.slice(0, 20).map((s) => s.entry);
+		const top = matches.slice(0, 20);
 
 		return this.buildSuggestions(top, atPrefix, isQuoted);
 	}
 
 	private buildSuggestions(
-		entries: FileEntry[],
+		paths: string[],
 		atPrefix: string,
 		isQuoted: boolean,
 	): { items: AutocompleteItem[]; prefix: string } | null {
-		const suggestions: AutocompleteItem[] = entries.map((entry) => {
-			const pathWithoutSlash = entry.isDirectory ? entry.path.slice(0, -1) : entry.path;
-			const displayPath = pathWithoutSlash;
+		const suggestions: AutocompleteItem[] = paths.map((rawPath) => {
+			const displayPath = rawPath.replace(/\\/g, "/");
+			const isDir = displayPath.endsWith("/");
+			const pathWithoutSlash = isDir ? displayPath.slice(0, -1) : displayPath;
 			const entryName = basename(pathWithoutSlash);
-			const completionPath = entry.isDirectory ? `${displayPath}/` : displayPath;
+			const completionPath = isDir ? `${pathWithoutSlash}/` : pathWithoutSlash;
 
-			// Build the completion value (with @ prefix, quoting if needed)
 			const needsQuotes = isQuoted || completionPath.includes(" ");
 			let value: string;
 			if (needsQuotes) {
@@ -318,8 +166,8 @@ export class FuzzyFileAutocompleteProvider implements AutocompleteProvider {
 
 			return {
 				value,
-				label: entryName + (entry.isDirectory ? "/" : ""),
-				description: displayPath,
+				label: entryName + (isDir ? "/" : ""),
+				description: pathWithoutSlash,
 			};
 		});
 
@@ -333,12 +181,13 @@ export class FuzzyFileAutocompleteProvider implements AutocompleteProvider {
 	}
 }
 
-// Cached fd path (resolved once at import time)
-const _fdPath = findFd();
+// Cached binary paths (resolved once at import time)
+const _fdPath = findBinary(["fd", "fdfind"]);
+const _fzfPath = findBinary(["fzf"]);
 
 /**
- * Convenience wrapper: wraps any AutocompleteProvider with fuzzy file matching.
- * Returns the provider unchanged if fd is not available.
+ * Convenience wrapper: wraps any AutocompleteProvider with fzf-powered fuzzy file matching.
+ * Returns the provider unchanged if fd or fzf is not available.
  *
  * Usage in a custom editor:
  *   override setAutocompleteProvider(provider: AutocompleteProvider) {
@@ -346,6 +195,6 @@ const _fdPath = findFd();
  *   }
  */
 export function wrapWithFuzzyFiles(provider: AutocompleteProvider, basePath?: string): AutocompleteProvider {
-	if (!_fdPath) return provider;
-	return new FuzzyFileAutocompleteProvider(provider, basePath ?? process.cwd(), _fdPath);
+	if (!_fdPath || !_fzfPath) return provider;
+	return new FzfFileAutocompleteProvider(provider, basePath ?? process.cwd(), _fdPath, _fzfPath);
 }
