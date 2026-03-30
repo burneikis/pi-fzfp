@@ -3,22 +3,14 @@
  *
  * Enhances pi's @file autocomplete using fd + fzf --filter.
  *
- * ## Standalone mode (no custom editor extension):
- *   pi -e ~/tools/fuzzy-file-picker/index.ts
+ * ## Standalone mode (no other custom editor extension):
+ *   Installs a FuzzyFileEditor as the editor component automatically.
  *
- * ## With pi-vim or another custom editor:
- *   Don't load this extension directly. Instead, import the provider wrapper
- *   in your custom editor:
- *
- *   import { wrapWithFuzzyFiles } from "~/tools/fuzzy-file-picker/provider.js";
- *
- *   class MyEditor extends CustomEditor {
- *     override setAutocompleteProvider(provider: AutocompleteProvider) {
- *       super.setAutocompleteProvider(wrapWithFuzzyFiles(provider));
- *     }
- *   }
- *
- *   See provider.ts for the reusable API.
+ * ## With pi-vim (or another custom editor):
+ *   Install both packages. pi-fzfp detects a custom editor via the
+ *   "pi-fzfp:check-editor" handshake at session_start and skips
+ *   setEditorComponent. It announces wrapWithFuzzyFiles via "pi-fzfp:provider"
+ *   so the other editor can wrap its own autocomplete provider.
  */
 
 import { CustomEditor, type ExtensionAPI } from "@mariozechner/pi-coding-agent";
@@ -32,7 +24,22 @@ class FuzzyFileEditor extends CustomEditor {
 }
 
 export default function (pi: ExtensionAPI) {
+	// Emit the provider immediately — catches any extensions that loaded before
+	// us and are already listening.
+	pi.events.emit("pi-fzfp:provider", wrapWithFuzzyFiles);
+
 	pi.on("session_start", (_event, ctx) => {
-		ctx.ui.setEditorComponent((tui, theme, kb) => new FuzzyFileEditor(tui, theme, kb));
+		// Re-emit now that all extension factories have run, so extensions that
+		// loaded after us and set up their listeners in their factory also get it.
+		pi.events.emit("pi-fzfp:provider", wrapWithFuzzyFiles);
+
+		// Ask if any other extension is handling the editor. All factory-time
+		// listeners are guaranteed to be registered by now.
+		let editorHandled = false;
+		pi.events.emit("pi-fzfp:check-editor", () => { editorHandled = true; });
+
+		if (!editorHandled) {
+			ctx.ui.setEditorComponent((tui, theme, kb) => new FuzzyFileEditor(tui, theme, kb));
+		}
 	});
 }
