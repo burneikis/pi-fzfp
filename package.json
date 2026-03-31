@@ -1,6 +1,6 @@
 {
   "name": "@burneikis/pi-fzfp",
-  "version": "2.2.0",
+  "version": "2.3.0",
   "description": "Fuzzy file picker for pi – fzf-powered @file autocomplete",
   "license": "MIT",
   "author": "burneikis",
