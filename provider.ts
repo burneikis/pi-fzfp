@@ -18,7 +18,8 @@
 
 import type { AutocompleteItem, AutocompleteProvider } from "@mariozechner/pi-tui";
 import { spawnSync } from "node:child_process";
-import { basename } from "node:path";
+import { basename, isAbsolute, resolve, join } from "node:path";
+import { homedir } from "node:os";
 
 /** Find a binary on PATH. */
 function findBinary(names: string[]): string | null {
@@ -69,13 +70,60 @@ function shellEscape(s: string): string {
 }
 
 /**
+ * Resolve a directory prefix from a raw query string.
+ * Handles ~, absolute paths, and relative paths (including ../).
+ * Returns { searchDir, fileQuery, dirPrefix }.
+ */
+function resolveQueryPath(
+	rawQuery: string,
+	basePath: string,
+): { searchDir: string; fileQuery: string; dirPrefix: string } {
+	const lastSlash = rawQuery.lastIndexOf("/");
+
+	// No slash — check if the query itself implies a root (~ or /)
+	if (lastSlash === -1) {
+		if (rawQuery === "~") {
+			// Treat bare ~ as listing the home dir
+			return { searchDir: homedir(), fileQuery: "", dirPrefix: "~/" };
+		}
+		if (rawQuery === "/") {
+			return { searchDir: "/", fileQuery: "", dirPrefix: "/" };
+		}
+		// Plain query with no path component — search in basePath
+		return { searchDir: basePath, fileQuery: rawQuery, dirPrefix: "" };
+	}
+
+	const dirPrefix = rawQuery.slice(0, lastSlash + 1); // includes trailing slash
+	const fileQuery = rawQuery.slice(lastSlash + 1);
+
+	let searchDir: string;
+	if (dirPrefix.startsWith("~/")) {
+		searchDir = join(homedir(), dirPrefix.slice(2));
+	} else if (isAbsolute(dirPrefix)) {
+		searchDir = dirPrefix;
+	} else {
+		// Handles ./, ../, bare subdir names, ../../ chains, etc.
+		searchDir = resolve(basePath, dirPrefix);
+	}
+
+	return { searchDir, fileQuery, dirPrefix };
+}
+
+/**
  * Run fd piped into fzf --filter via a shell pipe.
  * This avoids buffering fd's entire output in Node — important for large
  * directories like ~ where fd can produce hundreds of MBs.
  * Returns paths sorted by fzf's scoring (best match first).
+ * When fileQuery is empty, fd output is returned directly (no fzf needed).
  */
 function fzfFilter(query: string, baseDir: string, fdPath: string, fzfPath: string): string[] {
-	const cmd = `'${shellEscape(fdPath)}' --base-directory '${shellEscape(baseDir)}' --type f --type d --hidden --exclude .git | '${shellEscape(fzfPath)}' --filter '${shellEscape(query)}'`;
+	let cmd: string;
+	if (query === "") {
+		// Empty query — list everything fd finds, no fzf scoring needed
+		cmd = `'${shellEscape(fdPath)}' --base-directory '${shellEscape(baseDir)}' --type f --type d --hidden --exclude .git`;
+	} else {
+		cmd = `'${shellEscape(fdPath)}' --base-directory '${shellEscape(baseDir)}' --type f --type d --hidden --exclude .git | '${shellEscape(fzfPath)}' --filter '${shellEscape(query)}'`;
+	}
 
 	const result = spawnSync("sh", ["-c", cmd], {
 		encoding: "utf-8",
@@ -126,23 +174,30 @@ export class FzfFileAutocompleteProvider implements AutocompleteProvider {
 			return this.inner.getSuggestions(lines, cursorLine, cursorCol, options);
 		}
 
-		// Use fzf --filter for fuzzy matching
-		const matches = fzfFilter(rawQuery, this.basePath, this.fdPath, this.fzfPath);
+		// Resolve the search directory and file query from the raw query
+		const { searchDir, fileQuery, dirPrefix } = resolveQueryPath(rawQuery, this.basePath);
 
-		return this.buildSuggestions(matches, atPrefix, isQuoted);
+		// Use fzf --filter for fuzzy matching
+		const matches = fzfFilter(fileQuery, searchDir, this.fdPath, this.fzfPath);
+
+		return this.buildSuggestions(matches, atPrefix, isQuoted, dirPrefix);
 	}
 
 	private buildSuggestions(
 		paths: string[],
 		atPrefix: string,
 		isQuoted: boolean,
+		dirPrefix: string = "",
 	): { items: AutocompleteItem[]; prefix: string } | null {
 		const suggestions: AutocompleteItem[] = paths.map((rawPath) => {
 			const displayPath = rawPath.replace(/\\/g, "/");
 			const isDir = displayPath.endsWith("/");
 			const pathWithoutSlash = isDir ? displayPath.slice(0, -1) : displayPath;
 			const entryName = basename(pathWithoutSlash);
-			const completionPath = isDir ? `${pathWithoutSlash}/` : pathWithoutSlash;
+			// Prepend the directory prefix so the completion inserts the full path
+			const completionPath = isDir
+				? `${dirPrefix}${pathWithoutSlash}/`
+				: `${dirPrefix}${pathWithoutSlash}`;
 
 			const needsQuotes = isQuoted || completionPath.includes(" ");
 			let value: string;
@@ -155,7 +210,7 @@ export class FzfFileAutocompleteProvider implements AutocompleteProvider {
 			return {
 				value,
 				label: entryName + (isDir ? "/" : ""),
-				description: pathWithoutSlash,
+				description: completionPath,
 			};
 		});
 
