@@ -18,6 +18,7 @@
 
 import type { AutocompleteItem, AutocompleteProvider } from "@mariozechner/pi-tui";
 import { spawnSync } from "node:child_process";
+import { readFileSync } from "node:fs";
 import { basename, isAbsolute, resolve, join } from "node:path";
 import { homedir } from "node:os";
 
@@ -31,6 +32,21 @@ function findBinary(names: string[]): string | null {
 	}
 	return null;
 }
+
+/** Read ~/.pi/agent/.fzfpignore once and return patterns as --exclude args. */
+function loadFzfpIgnore(): string[] {
+	const filePath = join(homedir(), ".pi", "agent", ".fzfpignore");
+	try {
+		return readFileSync(filePath, "utf-8")
+			.split("\n")
+			.map((l) => l.trim())
+			.filter((l) => l.length > 0 && !l.startsWith("#"));
+	} catch {
+		return [];
+	}
+}
+
+const _ignorePatterns: string[] = loadFzfpIgnore();
 
 const PATH_DELIMITERS = new Set([" ", "\t", '"', "'"]);
 
@@ -116,13 +132,16 @@ function resolveQueryPath(
  * Returns paths sorted by fzf's scoring (best match first).
  * When fileQuery is empty, fd output is returned directly (no fzf needed).
  */
-function fzfFilter(query: string, baseDir: string, fdPath: string, fzfPath: string): string[] {
+function fzfFilter(query: string, baseDir: string, fdPath: string, fzfPath: string, ignorePatterns: string[]): string[] {
+	const excludeArgs = ["--exclude", ".git", ...ignorePatterns.flatMap((p) => ["--exclude", p])]
+		.map((a) => `'${shellEscape(a)}'`)
+		.join(" ");
 	let cmd: string;
 	if (query === "") {
 		// Empty query — list everything fd finds, no fzf scoring needed
-		cmd = `'${shellEscape(fdPath)}' --base-directory '${shellEscape(baseDir)}' --type f --type d --hidden --exclude .git`;
+		cmd = `'${shellEscape(fdPath)}' --base-directory '${shellEscape(baseDir)}' --type f --type d --hidden ${excludeArgs}`;
 	} else {
-		cmd = `'${shellEscape(fdPath)}' --base-directory '${shellEscape(baseDir)}' --type f --type d --hidden --exclude .git | '${shellEscape(fzfPath)}' --filter '${shellEscape(query)}'`;
+		cmd = `'${shellEscape(fdPath)}' --base-directory '${shellEscape(baseDir)}' --type f --type d --hidden ${excludeArgs} | '${shellEscape(fzfPath)}' --filter '${shellEscape(query)}'`;
 	}
 
 	const result = spawnSync("sh", ["-c", cmd], {
@@ -178,7 +197,7 @@ export class FzfFileAutocompleteProvider implements AutocompleteProvider {
 		const { searchDir, fileQuery, dirPrefix } = resolveQueryPath(rawQuery, this.basePath);
 
 		// Use fzf --filter for fuzzy matching
-		const matches = fzfFilter(fileQuery, searchDir, this.fdPath, this.fzfPath);
+		const matches = fzfFilter(fileQuery, searchDir, this.fdPath, this.fzfPath, _ignorePatterns);
 
 		return this.buildSuggestions(matches, atPrefix, isQuoted, dirPrefix);
 	}
