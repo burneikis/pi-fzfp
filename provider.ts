@@ -1,9 +1,10 @@
 /**
- * FzfFileAutocompleteProvider - Wraps any AutocompleteProvider with fzf-powered
+ * FzfFileAutocompleteProvider - Wraps any AutocompleteProvider with in-process
  * fuzzy matching for @ file queries.
  *
- * Uses `fd` to list files and `fzf --filter` for non-interactive fuzzy matching
- * and scoring. No custom scoring logic — just fzf.
+ * Uses `rg --files` (or `fd` as fallback) to collect file paths, then scores
+ * them with a pure-TypeScript fuzzy matcher (nucleo-style scoring). No external
+ * fzf dependency required at query time.
  *
  * Import and use in any custom editor:
  *
@@ -17,10 +18,13 @@
  */
 
 import type { AutocompleteItem, AutocompleteProvider } from "@mariozechner/pi-tui";
-import { spawnSync } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import { readFileSync } from "node:fs";
 import { basename, isAbsolute, resolve, join } from "node:path";
 import { homedir } from "node:os";
+import { FileIndex } from "./file-index.js";
+
+const MAX_RESULTS = 50;
 
 /** Find a binary on PATH. */
 function findBinary(names: string[]): string | null {
@@ -33,7 +37,7 @@ function findBinary(names: string[]): string | null {
 	return null;
 }
 
-/** Read ~/.pi/agent/.fzfpignore once and return patterns as --exclude args. */
+/** Read ~/.pi/agent/.fzfpignore once and return patterns. */
 function loadFzfpIgnore(): string[] {
 	const filePath = join(homedir(), ".pi", "agent", ".fzfpignore");
 	try {
@@ -71,18 +75,16 @@ function extractAtPrefix(text: string): string | null {
 	// Find the last delimiter to locate the current token
 	let lastDelim = -1;
 	for (let i = text.length - 1; i >= 0; i--) {
-		if (PATH_DELIMITERS.has(text[i]!)) { lastDelim = i; break; }
+		if (PATH_DELIMITERS.has(text[i]!)) {
+			lastDelim = i;
+			break;
+		}
 	}
 	const tokenStart = lastDelim + 1;
 	if (text[tokenStart] === "@") {
 		return text.slice(tokenStart);
 	}
 	return null;
-}
-
-/** Shell-escape a string for single-quoted context. */
-function shellEscape(s: string): string {
-	return s.replace(/'/g, "'\\''");
 }
 
 /**
@@ -96,20 +98,17 @@ function resolveQueryPath(
 ): { searchDir: string; fileQuery: string; dirPrefix: string } {
 	const lastSlash = rawQuery.lastIndexOf("/");
 
-	// No slash — check if the query itself implies a root (~ or /)
 	if (lastSlash === -1) {
 		if (rawQuery === "~") {
-			// Treat bare ~ as listing the home dir
 			return { searchDir: homedir(), fileQuery: "", dirPrefix: "~/" };
 		}
 		if (rawQuery === "/") {
 			return { searchDir: "/", fileQuery: "", dirPrefix: "/" };
 		}
-		// Plain query with no path component — search in basePath
 		return { searchDir: basePath, fileQuery: rawQuery, dirPrefix: "" };
 	}
 
-	const dirPrefix = rawQuery.slice(0, lastSlash + 1); // includes trailing slash
+	const dirPrefix = rawQuery.slice(0, lastSlash + 1);
 	const fileQuery = rawQuery.slice(lastSlash + 1);
 
 	let searchDir: string;
@@ -118,7 +117,6 @@ function resolveQueryPath(
 	} else if (isAbsolute(dirPrefix)) {
 		searchDir = dirPrefix;
 	} else {
-		// Handles ./, ../, bare subdir names, ../../ chains, etc.
 		searchDir = resolve(basePath, dirPrefix);
 	}
 
@@ -126,80 +124,145 @@ function resolveQueryPath(
 }
 
 /**
- * Run fd piped into fzf --filter via a shell pipe.
- * This avoids buffering fd's entire output in Node — important for large
- * directories like ~ where fd can produce hundreds of MBs.
- * Returns paths sorted by fzf's scoring (best match first).
- * When fileQuery is empty, fd output is returned directly (no fzf needed).
+ * Manages a FileIndex for a given directory. Spawns rg/fd asynchronously to
+ * collect file paths and feeds them into the index incrementally.
  */
-function fzfFilter(query: string, baseDir: string, fdPath: string, fzfPath: string, ignorePatterns: string[]): string[] {
-	const excludeArgs = ["--exclude", ".git", ...ignorePatterns.flatMap((p) => ["--exclude", p])]
-		.map((a) => `'${shellEscape(a)}'`)
-		.join(" ");
-	let cmd: string;
-	if (query === "") {
-		// Empty query — list everything fd finds, no fzf scoring needed
-		cmd = `'${shellEscape(fdPath)}' --base-directory '${shellEscape(baseDir)}' --type f --type d --hidden ${excludeArgs}`;
-	} else {
-		cmd = `'${shellEscape(fdPath)}' --base-directory '${shellEscape(baseDir)}' --type f --type d --hidden ${excludeArgs} | '${shellEscape(fzfPath)}' --filter '${shellEscape(query)}'`;
+class DirIndex {
+	readonly index = new FileIndex();
+	private _queryable: Promise<void>;
+	private _done: Promise<void>;
+
+	constructor(dir: string, listerPath: string, listerType: "rg" | "fd", ignorePatterns: string[]) {
+		const { queryable, done } = this.startListing(dir, listerPath, listerType, ignorePatterns);
+		this._queryable = queryable;
+		this._done = done;
 	}
 
-	const result = spawnSync("sh", ["-c", cmd], {
-		encoding: "utf-8",
-		stdio: ["pipe", "pipe", "pipe"],
-		maxBuffer: 10 * 1024 * 1024,
-	});
+	get queryable(): Promise<void> {
+		return this._queryable;
+	}
 
-	// fzf --filter exits 0 on matches, 1 on no matches;
-	// the pipe means sh returns fzf's exit code
-	if (!result.stdout) return [];
+	get done(): Promise<void> {
+		return this._done;
+	}
 
-	return result.stdout.trim().split("\n").filter(Boolean);
+	private startListing(
+		dir: string,
+		listerPath: string,
+		listerType: "rg" | "fd",
+		ignorePatterns: string[],
+	): { queryable: Promise<void>; done: Promise<void> } {
+		const args: string[] = [];
+
+		if (listerType === "rg") {
+			args.push("--files", "--hidden", "--glob", "!.git");
+			for (const p of ignorePatterns) {
+				args.push("--glob", `!${p}`);
+			}
+		} else {
+			args.push("--base-directory", dir, "--type", "f", "--type", "d", "--hidden", "--exclude", ".git");
+			for (const p of ignorePatterns) {
+				args.push("--exclude", p);
+			}
+		}
+
+		const child = spawn(listerPath, args, {
+			cwd: dir,
+			stdio: ["ignore", "pipe", "ignore"],
+		});
+
+		let queryableResolve: () => void;
+		let doneResolve: () => void;
+		const queryable = new Promise<void>((r) => (queryableResolve = r));
+		const done = new Promise<void>((r) => (doneResolve = r));
+
+		const lines: string[] = [];
+		let partial = "";
+
+		child.stdout!.on("data", (chunk: Buffer) => {
+			const text = partial + chunk.toString("utf-8");
+			const parts = text.split("\n");
+			partial = parts.pop()!;
+			for (const line of parts) {
+				if (line.length > 0) lines.push(line);
+			}
+		});
+
+		child.on("close", () => {
+			if (partial.length > 0) lines.push(partial);
+			const { queryable: q, done: d } = this.index.loadFromFileListAsync(lines);
+			q.then(() => queryableResolve!());
+			d.then(() => doneResolve!());
+		});
+
+		child.on("error", () => {
+			// If the lister fails, resolve with empty index
+			queryableResolve!();
+			doneResolve!();
+		});
+
+		return { queryable, done };
+	}
 }
 
 /**
  * Wraps an existing AutocompleteProvider to enhance @ file matching
- * with fzf-powered fuzzy matching.
+ * with in-process fuzzy matching.
  */
 export class FzfFileAutocompleteProvider implements AutocompleteProvider {
 	private inner: AutocompleteProvider;
 	private basePath: string;
-	private fdPath: string;
-	private fzfPath: string;
+	private listerPath: string;
+	private listerType: "rg" | "fd";
+	private dirIndexes = new Map<string, DirIndex>();
 
-	constructor(inner: AutocompleteProvider, basePath: string, fdPath: string, fzfPath: string) {
+	constructor(inner: AutocompleteProvider, basePath: string, listerPath: string, listerType: "rg" | "fd") {
 		this.inner = inner;
 		this.basePath = basePath;
-		this.fdPath = fdPath;
-		this.fzfPath = fzfPath;
+		this.listerPath = listerPath;
+		this.listerType = listerType;
+
+		// Pre-warm the base directory index
+		this.getOrCreateDirIndex(basePath);
+	}
+
+	private getOrCreateDirIndex(dir: string): DirIndex {
+		let di = this.dirIndexes.get(dir);
+		if (!di) {
+			di = new DirIndex(dir, this.listerPath, this.listerType, _ignorePatterns);
+			this.dirIndexes.set(dir, di);
+		}
+		return di;
 	}
 
 	getSuggestions(lines: string[], cursorLine: number, cursorCol: number, options?: any) {
 		const currentLine = lines[cursorLine] || "";
 		const textBeforeCursor = currentLine.slice(0, cursorCol);
 
-		// Only intercept @ file queries
 		const atPrefix = extractAtPrefix(textBeforeCursor);
 		if (!atPrefix) {
 			return this.inner.getSuggestions(lines, cursorLine, cursorCol, options);
 		}
 
-		// Parse the raw query after @
 		const isQuoted = atPrefix.startsWith('@"');
 		const rawQuery = isQuoted ? atPrefix.slice(2) : atPrefix.slice(1);
 
-		// If query is empty, let the original handler deal with it
 		if (!rawQuery) {
 			return this.inner.getSuggestions(lines, cursorLine, cursorCol, options);
 		}
 
-		// Resolve the search directory and file query from the raw query
 		const { searchDir, fileQuery, dirPrefix } = resolveQueryPath(rawQuery, this.basePath);
+		const di = this.getOrCreateDirIndex(searchDir);
 
-		// Use fzf --filter for fuzzy matching
-		const matches = fzfFilter(fileQuery, searchDir, this.fdPath, this.fzfPath, _ignorePatterns);
+		// Search the index (works on whatever is indexed so far)
+		const results = di.index.search(fileQuery, MAX_RESULTS);
 
-		return this.buildSuggestions(matches, atPrefix, isQuoted, dirPrefix);
+		return this.buildSuggestions(
+			results.map((r) => r.path),
+			atPrefix,
+			isQuoted,
+			dirPrefix,
+		);
 	}
 
 	private buildSuggestions(
@@ -213,10 +276,7 @@ export class FzfFileAutocompleteProvider implements AutocompleteProvider {
 			const isDir = displayPath.endsWith("/");
 			const pathWithoutSlash = isDir ? displayPath.slice(0, -1) : displayPath;
 			const entryName = basename(pathWithoutSlash);
-			// Prepend the directory prefix so the completion inserts the full path
-			const completionPath = isDir
-				? `${dirPrefix}${pathWithoutSlash}/`
-				: `${dirPrefix}${pathWithoutSlash}`;
+			const completionPath = isDir ? `${dirPrefix}${pathWithoutSlash}/` : `${dirPrefix}${pathWithoutSlash}`;
 
 			const needsQuotes = isQuoted || completionPath.includes(" ");
 			let value: string;
@@ -243,20 +303,17 @@ export class FzfFileAutocompleteProvider implements AutocompleteProvider {
 	}
 }
 
-// Cached binary paths (resolved once at import time)
+// Resolve lister binary once at import time: prefer rg, fallback to fd
+const _rgPath = findBinary(["rg"]);
 const _fdPath = findBinary(["fd", "fdfind"]);
-const _fzfPath = findBinary(["fzf"]);
+const _listerPath = _rgPath ?? _fdPath;
+const _listerType: "rg" | "fd" = _rgPath ? "rg" : "fd";
 
 /**
- * Convenience wrapper: wraps any AutocompleteProvider with fzf-powered fuzzy file matching.
- * Returns the provider unchanged if fd or fzf is not available.
- *
- * Usage in a custom editor:
- *   override setAutocompleteProvider(provider: AutocompleteProvider) {
- *     super.setAutocompleteProvider(wrapWithFuzzyFiles(provider));
- *   }
+ * Convenience wrapper: wraps any AutocompleteProvider with in-process fuzzy file matching.
+ * Returns the provider unchanged if neither rg nor fd is available.
  */
 export function wrapWithFuzzyFiles(provider: AutocompleteProvider, basePath?: string): AutocompleteProvider {
-	if (!_fdPath || !_fzfPath) return provider;
-	return new FzfFileAutocompleteProvider(provider, basePath ?? process.cwd(), _fdPath, _fzfPath);
+	if (!_listerPath) return provider;
+	return new FzfFileAutocompleteProvider(provider, basePath ?? process.cwd(), _listerPath, _listerType);
 }

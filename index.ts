@@ -1,7 +1,8 @@
 /**
- * Fuzzy File Picker Extension (fzf-powered)
+ * Fuzzy File Picker Extension
  *
- * Enhances pi's @file autocomplete using fd + fzf --filter.
+ * Enhances pi's @file autocomplete using an in-process fuzzy matcher
+ * (nucleo-style scoring) with rg/fd for file discovery.
  *
  * ## Standalone mode (no other custom editor extension):
  *   Installs a FuzzyFileEditor as the editor component automatically.
