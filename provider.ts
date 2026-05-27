@@ -16,7 +16,7 @@
  *   }
  */
 
-import type { AutocompleteItem, AutocompleteProvider } from "@mariozechner/pi-tui";
+import type { AutocompleteItem, AutocompleteProvider } from "@earendil-works/pi-tui";
 import { spawnSync } from "node:child_process";
 import { readFileSync } from "node:fs";
 import { basename, isAbsolute, resolve, join } from "node:path";
