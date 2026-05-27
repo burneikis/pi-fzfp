@@ -80,11 +80,6 @@ function extractAtPrefix(text: string): string | null {
 	return null;
 }
 
-/** Shell-escape a string for single-quoted context. */
-function shellEscape(s: string): string {
-	return s.replace(/'/g, "'\\''");
-}
-
 /**
  * Resolve a directory prefix from a raw query string.
  * Handles ~, absolute paths, and relative paths (including ../).
@@ -125,35 +120,58 @@ function resolveQueryPath(
 	return { searchDir, fileQuery, dirPrefix };
 }
 
+// Cache for fd output per directory: { files, timestamp }
+const _fdCache = new Map<string, { files: string[]; timestamp: number }>();
+const FD_CACHE_TTL_MS = 30_000; // refresh fd listing every 30s
+
 /**
- * Run fd piped into fzf --filter via a shell pipe.
- * This avoids buffering fd's entire output in Node — important for large
- * directories like ~ where fd can produce hundreds of MBs.
- * Returns paths sorted by fzf's scoring (best match first).
- * When fileQuery is empty, fd output is returned directly (no fzf needed).
+ * Build the list of --exclude args from ignore patterns.
  */
-function fzfFilter(query: string, baseDir: string, fdPath: string, fzfPath: string, ignorePatterns: string[]): string[] {
-	const excludeArgs = ["--exclude", ".git", ...ignorePatterns.flatMap((p) => ["--exclude", p])]
-		.map((a) => `'${shellEscape(a)}'`)
-		.join(" ");
-	let cmd: string;
-	if (query === "") {
-		// Empty query — list everything fd finds, no fzf scoring needed
-		cmd = `'${shellEscape(fdPath)}' --base-directory '${shellEscape(baseDir)}' --type f --type d --hidden ${excludeArgs}`;
-	} else {
-		cmd = `'${shellEscape(fdPath)}' --base-directory '${shellEscape(baseDir)}' --type f --type d --hidden ${excludeArgs} | '${shellEscape(fzfPath)}' --filter '${shellEscape(query)}'`;
+function buildExcludeArgs(ignorePatterns: string[]): string[] {
+	return ["--exclude", ".git", ...ignorePatterns.flatMap((p) => ["--exclude", p])];
+}
+
+/**
+ * Run fd to list files in baseDir, or return cached result if fresh.
+ * Uses spawnSync for the initial scan (blocking, but amortized over many keystrokes).
+ */
+function getFdFiles(baseDir: string, fdPath: string, ignorePatterns: string[]): string[] {
+	const now = Date.now();
+	const cached = _fdCache.get(baseDir);
+	if (cached && now - cached.timestamp < FD_CACHE_TTL_MS) {
+		return cached.files;
 	}
 
-	const result = spawnSync("sh", ["-c", cmd], {
+	const excludeArgs = buildExcludeArgs(ignorePatterns);
+	const result = spawnSync(fdPath, [
+		"--base-directory", baseDir,
+		"--type", "f", "--type", "d",
+		"--hidden",
+		...excludeArgs,
+	], {
 		encoding: "utf-8",
-		stdio: ["pipe", "pipe", "pipe"],
 		maxBuffer: 10 * 1024 * 1024,
 	});
 
-	// fzf --filter exits 0 on matches, 1 on no matches;
-	// the pipe means sh returns fzf's exit code
-	if (!result.stdout) return [];
+	const files = result.stdout?.trim().split("\n").filter(Boolean) ?? [];
+	_fdCache.set(baseDir, { files, timestamp: now });
+	return files;
+}
 
+/**
+ * Run fzf --filter on a list of file paths.
+ * This is fast (microseconds) since the input is already in memory.
+ */
+function fzfFilterFiles(query: string, files: string[], fzfPath: string): string[] {
+	if (query === "" || files.length === 0) return files;
+
+	const result = spawnSync(fzfPath, ["--filter", query], {
+		input: files.join("\n"),
+		encoding: "utf-8",
+		maxBuffer: 10 * 1024 * 1024,
+	});
+
+	if (!result.stdout) return [];
 	return result.stdout.trim().split("\n").filter(Boolean);
 }
 
@@ -196,8 +214,11 @@ export class FzfFileAutocompleteProvider implements AutocompleteProvider {
 		// Resolve the search directory and file query from the raw query
 		const { searchDir, fileQuery, dirPrefix } = resolveQueryPath(rawQuery, this.basePath);
 
-		// Use fzf --filter for fuzzy matching
-		const matches = fzfFilter(fileQuery, searchDir, this.fdPath, this.fzfPath, _ignorePatterns);
+		// Get fd file listing (cached per directory, refreshes every 30s)
+		const allFiles = getFdFiles(searchDir, this.fdPath, _ignorePatterns);
+
+		// Run fzf --filter on the cached file list (fast, no filesystem I/O)
+		const matches = fzfFilterFiles(fileQuery, allFiles, this.fzfPath);
 
 		return this.buildSuggestions(matches, atPrefix, isQuoted, dirPrefix);
 	}
