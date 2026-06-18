@@ -16,21 +16,40 @@
  *   }
  */
 
-import type { AutocompleteItem, AutocompleteProvider } from "@mariozechner/pi-tui";
+import type { AutocompleteItem, AutocompleteProvider } from "@earendil-works/pi-tui";
 import { spawnSync } from "node:child_process";
-import { readFileSync } from "node:fs";
-import { basename, isAbsolute, resolve, join } from "node:path";
+import { accessSync, constants, readFileSync } from "node:fs";
+import { basename, isAbsolute, resolve, join, delimiter } from "node:path";
 import { homedir } from "node:os";
 
-/** Find a binary on PATH. */
+/** Find a binary on PATH using pure filesystem checks (no subprocess). */
 function findBinary(names: string[]): string | null {
+	const pathDirs = (process.env.PATH ?? "").split(delimiter).filter(Boolean);
+	// On Windows, executables may have extensions listed in PATHEXT.
+	const exts = process.platform === "win32" ? (process.env.PATHEXT ?? ".EXE;.CMD;.BAT;.COM").split(";") : [""];
 	for (const name of names) {
-		const result = spawnSync("which", [name], { encoding: "utf-8", stdio: ["pipe", "pipe", "pipe"] });
-		if (result.status === 0 && result.stdout.trim()) {
-			return result.stdout.trim();
+		if (isAbsolute(name)) {
+			if (isExecutable(name)) return name;
+			continue;
+		}
+		for (const dir of pathDirs) {
+			for (const ext of exts) {
+				const candidate = join(dir, name + ext);
+				if (isExecutable(candidate)) return candidate;
+			}
 		}
 	}
 	return null;
+}
+
+/** Whether a path exists and is executable. */
+function isExecutable(path: string): boolean {
+	try {
+		accessSync(path, constants.X_OK);
+		return true;
+	} catch {
+		return false;
+	}
 }
 
 /** Read ~/.pi/agent/.fzfpignore once and return patterns as --exclude args. */

@@ -8,7 +8,7 @@
  * matched with fzf; everything else delegates to the underlying provider.
  */
 
-import type { ExtensionAPI } from "@mariozechner/pi-coding-agent";
+import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { wrapWithFuzzyFiles } from "./provider.js";
 
 export default function (pi: ExtensionAPI) {
