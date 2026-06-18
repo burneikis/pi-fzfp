@@ -17,24 +17,14 @@ pi-fzfp pipes `fd` output through `fzf --filter` for true subsequence fuzzy matc
 
 ## Install
 
-### Standalone (default editor)
-
 ```bash
 pi install npm:@burneikis/pi-fzfp
 ```
 
-pi-fzfp installs its own `FuzzyFileEditor` as the active editor component.
-
-### With pi-vim (or another compatible custom editor)
-
-Install both as separate pi packages:
-
-```bash
-pi install npm:@burneikis/pi-vim
-pi install npm:@burneikis/pi-fzfp
-```
-
-pi-fzfp detects the other editor at startup via `pi.events` and skips installing its own editor component. It hands off `wrapWithFuzzyFiles` to the other editor instead.
+pi-fzfp stacks an fzf-powered autocomplete provider on top of the built-in
+provider via `ctx.ui.addAutocompleteProvider()`. It does not install an editor
+component, so it works alongside any custom editor (pi-vim, etc.) with no extra
+configuration or coordination — just install both packages.
 
 ## How It Works
 
@@ -45,56 +35,15 @@ pi-fzfp detects the other editor at startup via `pi.events` and skips installing
 3. Pipes the file list through `fzf --filter=<query>` for fuzzy matching and scoring
 4. Returns all matches sorted by fzf's score (no artificial limit)
 5. Builds autocomplete suggestions with proper `@` prefix and quoting
-6. Non-`@` queries pass through to the original provider unchanged
+6. Non-`@` queries delegate to the underlying provider unchanged
 
-### Integration Protocol
+### Integration
 
-pi-fzfp uses `pi.events` to coordinate with custom editor extensions so neither package needs to know about or depend on the other.
-
-**During the factory function** (runs once at load time):
-- Emits `"pi-fzfp:provider"` with `wrapWithFuzzyFiles` — caught by any editor extension that loaded before pi-fzfp and is already listening.
-
-**During `session_start`** (runs after all extension factories have completed):
-- Re-emits `"pi-fzfp:provider"` — caught by editor extensions that loaded after pi-fzfp and set up their listener during their own factory.
-- Emits `"pi-fzfp:check-editor"` with an ack callback — if any other extension acks, pi-fzfp skips `setEditorComponent` and lets that extension own the editor.
-
-This double-emit pattern means the load order of pi-fzfp relative to another editor extension doesn't matter.
-
-### Implementing the protocol in your editor extension
-
-Register both listeners during your factory (before `session_start`), so they are always in place when pi-fzfp's `session_start` fires:
-
-```typescript
-import type { ExtensionAPI } from "@mariozechner/pi-coding-agent";
-import type { AutocompleteProvider } from "@mariozechner/pi-tui";
-
-export default function (pi: ExtensionAPI) {
-  let wrapAutocomplete: ((provider: AutocompleteProvider) => AutocompleteProvider) | undefined;
-
-  // Prevent pi-fzfp from setting its own editor component.
-  pi.events.on("pi-fzfp:check-editor", (ack: () => void) => { ack(); });
-
-  // Receive the provider — pi-fzfp emits this from both its factory and its
-  // session_start to cover both possible load orderings.
-  pi.events.on("pi-fzfp:provider", (fn: (provider: AutocompleteProvider) => AutocompleteProvider) => {
-    wrapAutocomplete = fn;
-  });
-
-  pi.on("session_start", (_event, ctx) => {
-    ctx.ui.setEditorComponent((tui, theme, keybindings) =>
-      new MyEditor(tui, theme, keybindings, wrapAutocomplete)
-    );
-  });
-}
-```
-
-Apply `wrapAutocomplete` in your editor's `setAutocompleteProvider`:
-
-```typescript
-override setAutocompleteProvider(provider: AutocompleteProvider): void {
-  super.setAutocompleteProvider(this.wrapAutocomplete ? this.wrapAutocomplete(provider) : provider);
-}
-```
+pi-fzfp registers its provider with `ctx.ui.addAutocompleteProvider((current) => ...)`
+at `session_start`. pi passes the currently-active provider as `current`, and
+pi-fzfp wraps it: `@` queries are matched with fzf, everything else delegates to
+`current`. Because this stacks on top of whatever provider is active (built-in or
+from a custom editor), no editor detection or event handshake is needed.
 
 ## API
 

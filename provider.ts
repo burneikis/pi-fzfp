@@ -167,6 +167,9 @@ export class FzfFileAutocompleteProvider implements AutocompleteProvider {
 	private fdPath: string;
 	private fzfPath: string;
 
+	/** Trigger fzf matching as soon as an @ is typed. */
+	triggerCharacters = ["@"];
+
 	constructor(inner: AutocompleteProvider, basePath: string, fdPath: string, fzfPath: string) {
 		this.inner = inner;
 		this.basePath = basePath;
@@ -240,6 +243,10 @@ export class FzfFileAutocompleteProvider implements AutocompleteProvider {
 
 	applyCompletion(lines: string[], cursorLine: number, cursorCol: number, item: AutocompleteItem, prefix: string) {
 		return this.inner.applyCompletion(lines, cursorLine, cursorCol, item, prefix);
+	}
+
+	shouldTriggerFileCompletion(lines: string[], cursorLine: number, cursorCol: number) {
+		return this.inner.shouldTriggerFileCompletion?.(lines, cursorLine, cursorCol) ?? true;
 	}
 }
 
