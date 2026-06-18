@@ -18,7 +18,7 @@ pi-fzfp pipes `fd` output through `fzf --filter` for true subsequence fuzzy matc
 ## Install
 
 ```bash
-pi install npm:@burneikis/pi-fzfp
+pi install npm:pi-fzfp
 ```
 
 pi-fzfp stacks an fzf-powered autocomplete provider on top of the built-in
