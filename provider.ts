@@ -80,10 +80,6 @@ function extractAtPrefix(text: string): string | null {
 	return null;
 }
 
-/** Shell-escape a string for single-quoted context. */
-function shellEscape(s: string): string {
-	return s.replace(/'/g, "'\\''");
-}
 
 /**
  * Resolve a directory prefix from a raw query string.
@@ -125,33 +121,70 @@ function resolveQueryPath(
 	return { searchDir, fileQuery, dirPrefix };
 }
 
+/** Time-to-live for cached fd listings, in milliseconds. */
+const FD_CACHE_TTL_MS = 30_000;
+
+interface FdCacheEntry {
+	lines: string[];
+	expires: number;
+}
+
+/** Per-directory cache of fd output, keyed by base directory. */
+const _fdCache = new Map<string, FdCacheEntry>();
+
 /**
- * Run fd piped into fzf --filter via a shell pipe.
- * This avoids buffering fd's entire output in Node — important for large
- * directories like ~ where fd can produce hundreds of MBs.
- * Returns paths sorted by fzf's scoring (best match first).
- * When fileQuery is empty, fd output is returned directly (no fzf needed).
+ * List files/dirs under baseDir using fd, caching the result per directory
+ * with a short TTL. fd (the filesystem walk) is the expensive part, so on
+ * repeated keystrokes we reuse the in-memory listing instead of re-scanning.
  */
-function fzfFilter(query: string, baseDir: string, fdPath: string, fzfPath: string, ignorePatterns: string[]): string[] {
-	const excludeArgs = ["--exclude", ".git", ...ignorePatterns.flatMap((p) => ["--exclude", p])]
-		.map((a) => `'${shellEscape(a)}'`)
-		.join(" ");
-	let cmd: string;
-	if (query === "") {
-		// Empty query — list everything fd finds, no fzf scoring needed
-		cmd = `'${shellEscape(fdPath)}' --base-directory '${shellEscape(baseDir)}' --type f --type d --hidden ${excludeArgs}`;
-	} else {
-		cmd = `'${shellEscape(fdPath)}' --base-directory '${shellEscape(baseDir)}' --type f --type d --hidden ${excludeArgs} | '${shellEscape(fzfPath)}' --filter '${shellEscape(query)}'`;
+function listFiles(baseDir: string, fdPath: string, ignorePatterns: string[]): string[] {
+	const now = Date.now();
+	const cached = _fdCache.get(baseDir);
+	if (cached && cached.expires > now) {
+		return cached.lines;
 	}
 
-	const result = spawnSync("sh", ["-c", cmd], {
+	const args = [
+		"--base-directory",
+		baseDir,
+		"--type",
+		"f",
+		"--type",
+		"d",
+		"--hidden",
+		"--exclude",
+		".git",
+		...ignorePatterns.flatMap((p) => ["--exclude", p]),
+	];
+
+	const result = spawnSync(fdPath, args, {
 		encoding: "utf-8",
 		stdio: ["pipe", "pipe", "pipe"],
-		maxBuffer: 10 * 1024 * 1024,
+		maxBuffer: 100 * 1024 * 1024,
 	});
 
-	// fzf --filter exits 0 on matches, 1 on no matches;
-	// the pipe means sh returns fzf's exit code
+	const lines = result.stdout ? result.stdout.trim().split("\n").filter(Boolean) : [];
+	_fdCache.set(baseDir, { lines, expires: now + FD_CACHE_TTL_MS });
+	return lines;
+}
+
+/**
+ * List files under baseDir (cached) and fuzzy-match them with fzf --filter.
+ * Returns paths sorted by fzf's scoring (best match first).
+ * When query is empty, the cached fd listing is returned directly.
+ */
+function fzfFilter(query: string, baseDir: string, fdPath: string, fzfPath: string, ignorePatterns: string[]): string[] {
+	const files = listFiles(baseDir, fdPath, ignorePatterns);
+	if (query === "" || files.length === 0) return files;
+
+	const result = spawnSync(fzfPath, ["--filter", query], {
+		encoding: "utf-8",
+		input: files.join("\n"),
+		stdio: ["pipe", "pipe", "pipe"],
+		maxBuffer: 100 * 1024 * 1024,
+	});
+
+	// fzf --filter exits 0 on matches, 1 on no matches.
 	if (!result.stdout) return [];
 
 	return result.stdout.trim().split("\n").filter(Boolean);
