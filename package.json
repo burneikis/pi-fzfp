@@ -11,6 +11,9 @@
   "keywords": [
     "pi-package"
   ],
+  "scripts": {
+    "test": "node --experimental-strip-types --test provider.test.ts"
+  },
   "files": [
     "index.ts",
     "provider.ts",

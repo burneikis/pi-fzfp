@@ -51,7 +51,7 @@ const _ignorePatterns: string[] = loadFzfpIgnore();
 const PATH_DELIMITERS = new Set([" ", "\t", '"', "'"]);
 
 /** Extract the @-prefixed token from text before cursor. */
-function extractAtPrefix(text: string): string | null {
+export function extractAtPrefix(text: string): string | null {
 	// Handle quoted @"..." prefix
 	let inQuotes = false;
 	let quoteStart = -1;
@@ -86,7 +86,7 @@ function extractAtPrefix(text: string): string | null {
  * Handles ~, absolute paths, and relative paths (including ../).
  * Returns { searchDir, fileQuery, dirPrefix }.
  */
-function resolveQueryPath(
+export function resolveQueryPath(
 	rawQuery: string,
 	basePath: string,
 ): { searchDir: string; fileQuery: string; dirPrefix: string } {
@@ -131,6 +131,11 @@ interface FdCacheEntry {
 
 /** Per-directory cache of fd output, keyed by base directory. */
 const _fdCache = new Map<string, FdCacheEntry>();
+
+/** Clear the fd listing cache. Primarily useful for tests. */
+export function clearFdCache(): void {
+	_fdCache.clear();
+}
 
 /**
  * List files/dirs under baseDir using fd, caching the result per directory
