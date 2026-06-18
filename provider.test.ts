@@ -277,6 +277,64 @@ describe("fd caching", { skip: !hasTools }, () => {
 });
 
 // ---------------------------------------------------------------------------
+// full-depth parity
+// ---------------------------------------------------------------------------
+describe("full-depth parity", { skip: !hasTools }, () => {
+	let dir: string;
+
+	const makeProvider = (base: string) =>
+		new FzfFileAutocompleteProvider(
+			{
+				triggerCharacters: [],
+				getSuggestions: () => null,
+				applyCompletion: () => ({ lines: [], cursorLine: 0, cursorCol: 0 }),
+			} as any,
+			base,
+			fdPath!,
+			fzfPath!,
+		);
+
+	before(() => {
+		dir = mkdtempSync(join(tmpdir(), "fzfp-deep-"));
+		// A deeply nested file (6 segments) plus a shallow one.
+		mkdirSync(join(dir, "a", "b", "c", "d", "e"), { recursive: true });
+		writeFileSync(join(dir, "a", "b", "c", "d", "e", "needle.ts"), "");
+		writeFileSync(join(dir, "surface.ts"), "");
+		clearFdCache();
+	});
+
+	after(() => {
+		rmSync(dir, { recursive: true, force: true });
+		clearFdCache();
+	});
+
+	test("finds shallow files", () => {
+		clearFdCache();
+		const res = makeProvider(dir).getSuggestions(["@surface"], 0, 8) as any;
+		assert.ok(res?.items.some((i: any) => i.value === "@surface.ts"));
+	});
+
+	test("finds deeply nested files (full-depth scan)", () => {
+		clearFdCache();
+		const res = makeProvider(dir).getSuggestions(["@needle"], 0, 7) as any;
+		assert.ok(
+			res?.items.some((i: any) => i.value.endsWith("needle.ts")),
+			`expected deep needle.ts, got ${JSON.stringify(res?.items?.map((i: any) => i.value))}`,
+		);
+	});
+
+	test("finds a deep file even when a shallow file also matches the query", () => {
+		clearFdCache();
+		// Both surface and a deep file share the "e" subsequence; the deep one
+		// must still appear (regression: depth-limited scans hid it).
+		writeFileSync(join(dir, "a", "b", "c", "d", "e", "surface-deep.ts"), "");
+		const res = makeProvider(dir).getSuggestions(["@surface"], 0, 8) as any;
+		const values = res?.items.map((i: any) => i.value) ?? [];
+		assert.ok(values.some((v: string) => v.endsWith("surface-deep.ts")), JSON.stringify(values));
+	});
+});
+
+// ---------------------------------------------------------------------------
 // wrapWithFuzzyFiles
 // ---------------------------------------------------------------------------
 describe("wrapWithFuzzyFiles", () => {

@@ -31,11 +31,27 @@ configuration or coordination — just install both packages.
 ### Autocomplete
 
 1. Intercepts `@` queries in the autocomplete provider
-2. Runs `fd` to list all project files (respects `.gitignore`, excludes `.git`)
+2. Runs `fd` to list project files (respects `.gitignore`, excludes `.git`)
 3. Pipes the file list through `fzf --filter=<query>` for fuzzy matching and scoring
 4. Returns all matches sorted by fzf's score (no artificial limit)
 5. Builds autocomplete suggestions with proper `@` prefix and quoting
 6. Non-`@` queries delegate to the underlying provider unchanged
+
+### Scanning and caching
+
+The `fd` filesystem walk is the expensive part, so pi-fzfp is careful about it:
+
+- **Full-depth scan with a time budget.** Directories are scanned full-depth so
+  deeply nested files are always found, with no result cap. A 5s wall-clock
+  timeout bounds the walk for pathological trees (e.g. accidentally scanning
+  `$HOME` or a network mount); fd is fast enough that this never trips on a
+  normal repo (tens of ms even for 100k files).
+- **Per-directory cache.** Each directory's listing is cached in memory with a
+  30s TTL and reused across keystrokes — repeated typing only re-runs the cheap
+  in-memory `fzf --filter`, not `fd`.
+
+Binary lookup (`fd`/`fzf`) uses a pure-filesystem PATH walk (`accessSync`), with
+no `which` subprocess.
 
 ### Integration
 

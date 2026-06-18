@@ -143,6 +143,14 @@ export function resolveQueryPath(
 /** Time-to-live for cached fd listings, in milliseconds. */
 const FD_CACHE_TTL_MS = 30_000;
 
+/**
+ * Wall-clock budget for a single fd scan, in milliseconds. fd is very fast even
+ * on large repos (tens of ms for 100k files), so this only ever trips on truly
+ * pathological trees (e.g. accidentally scanning $HOME or a network mount).
+ * On timeout we keep whatever fd emitted before being killed.
+ */
+const FD_TIMEOUT_MS = 5_000;
+
 interface FdCacheEntry {
 	lines: string[];
 	expires: number;
@@ -158,8 +166,10 @@ export function clearFdCache(): void {
 
 /**
  * List files/dirs under baseDir using fd, caching the result per directory
- * with a short TTL. fd (the filesystem walk) is the expensive part, so on
- * repeated keystrokes we reuse the in-memory listing instead of re-scanning.
+ * with a short TTL. The scan is full-depth for full parity with a normal
+ * listing; a wall-clock timeout (not a result cap) bounds pathological trees
+ * so deeply nested files in normal repos are always found. On repeated
+ * keystrokes we reuse the cached listing instead of re-scanning.
  */
 function listFiles(baseDir: string, fdPath: string, ignorePatterns: string[]): string[] {
 	const now = Date.now();
@@ -185,6 +195,7 @@ function listFiles(baseDir: string, fdPath: string, ignorePatterns: string[]): s
 		encoding: "utf-8",
 		stdio: ["pipe", "pipe", "pipe"],
 		maxBuffer: 100 * 1024 * 1024,
+		timeout: FD_TIMEOUT_MS,
 	});
 
 	const lines = result.stdout ? result.stdout.trim().split("\n").filter(Boolean) : [];
@@ -192,15 +203,9 @@ function listFiles(baseDir: string, fdPath: string, ignorePatterns: string[]): s
 	return lines;
 }
 
-/**
- * List files under baseDir (cached) and fuzzy-match them with fzf --filter.
- * Returns paths sorted by fzf's scoring (best match first).
- * When query is empty, the cached fd listing is returned directly.
- */
-function fzfFilter(query: string, baseDir: string, fdPath: string, fzfPath: string, ignorePatterns: string[]): string[] {
-	const files = listFiles(baseDir, fdPath, ignorePatterns);
-	if (query === "" || files.length === 0) return files;
-
+/** Fuzzy-match a list of paths with fzf --filter, best match first. */
+function runFzf(query: string, files: string[], fzfPath: string): string[] {
+	if (files.length === 0) return [];
 	const result = spawnSync(fzfPath, ["--filter", query], {
 		encoding: "utf-8",
 		input: files.join("\n"),
@@ -210,8 +215,18 @@ function fzfFilter(query: string, baseDir: string, fdPath: string, fzfPath: stri
 
 	// fzf --filter exits 0 on matches, 1 on no matches.
 	if (!result.stdout) return [];
-
 	return result.stdout.trim().split("\n").filter(Boolean);
+}
+
+/**
+ * List files under baseDir (cached) and fuzzy-match them with fzf --filter.
+ * Returns paths sorted by fzf's scoring (best match first).
+ * When query is empty, the cached fd listing is returned directly.
+ */
+function fzfFilter(query: string, baseDir: string, fdPath: string, fzfPath: string, ignorePatterns: string[]): string[] {
+	const files = listFiles(baseDir, fdPath, ignorePatterns);
+	if (query === "") return files;
+	return runFzf(query, files, fzfPath);
 }
 
 /**
