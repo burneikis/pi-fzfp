@@ -163,9 +163,10 @@ describe("FzfFileAutocompleteProvider", { skip: !hasTools }, () => {
 
 	before(() => {
 		dir = mkdtempSync(join(tmpdir(), "fzfp-test-"));
-		mkdirSync(join(dir, "src"));
+		mkdirSync(join(dir, "src", "nested"), { recursive: true });
 		writeFileSync(join(dir, "src", "alpha.ts"), "");
 		writeFileSync(join(dir, "src", "beta.ts"), "");
+		writeFileSync(join(dir, "src", "nested", "deep.ts"), "");
 		writeFileSync(join(dir, "readme.md"), "");
 		clearFdCache();
 	});
@@ -206,6 +207,17 @@ describe("FzfFileAutocompleteProvider", { skip: !hasTools }, () => {
 		const dirItem = res.items.find((i: any) => i.label === "src/");
 		assert.ok(dirItem, "expected a src/ directory entry");
 		assert.equal(dirItem.value, "@src/");
+	});
+
+	test("browsing into a directory lists immediate children only (no recursion)", () => {
+		const { inner } = makeInner();
+		// @src/ has an empty file query -> children of src/, not a recursive scan.
+		const res = suggest(provider(inner), "@src/") as any;
+		const values = res.items.map((i: any) => i.value);
+		assert.ok(values.includes("@src/alpha.ts"), JSON.stringify(values));
+		assert.ok(values.includes("@src/nested/"), JSON.stringify(values));
+		// The nested file must NOT appear: browsing is non-recursive.
+		assert.ok(!values.includes("@src/nested/deep.ts"), JSON.stringify(values));
 	});
 
 	test("scopes results to a directory prefix", () => {

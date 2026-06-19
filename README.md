@@ -46,9 +46,15 @@ The `fd` filesystem walk is the expensive part, so pi-fzfp is careful about it:
   timeout bounds the walk for pathological trees (e.g. accidentally scanning
   `$HOME` or a network mount); fd is fast enough that this never trips on a
   normal repo (tens of ms even for 100k files).
-- **Per-directory cache.** Each directory's listing is cached in memory with a
-  30s TTL and reused across keystrokes — repeated typing only re-runs the cheap
-  in-memory `fzf --filter`, not `fd`.
+- **Browse without recursing.** When the file query is empty (e.g. navigating
+  into `@~/` or `@/mnt/e/`), only the directory's immediate children are listed
+  (`readdirSync`), not a full recursive scan. The recursive `fd` scan runs only
+  once you start typing a name. This keeps browsing into huge directories
+  instant.
+- **Per-directory cache.** Each directory's listing (both recursive scans and
+  child listings) is cached in memory with a 30s TTL and reused across
+  keystrokes — repeated typing only re-runs the cheap in-memory `fzf --filter`,
+  not `fd`.
 
 Binary lookup (`fd`/`fzf`) uses a pure-filesystem PATH walk (`accessSync`), with
 no `which` subprocess.

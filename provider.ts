@@ -18,7 +18,7 @@
 
 import type { AutocompleteItem, AutocompleteProvider } from "@earendil-works/pi-tui";
 import { spawnSync } from "node:child_process";
-import { accessSync, constants, readFileSync } from "node:fs";
+import { accessSync, constants, readFileSync, readdirSync } from "node:fs";
 import { basename, isAbsolute, resolve, join, delimiter } from "node:path";
 import { homedir } from "node:os";
 
@@ -203,6 +203,34 @@ function listFiles(baseDir: string, fdPath: string, ignorePatterns: string[]): s
 	return lines;
 }
 
+/**
+ * List only the immediate children of baseDir (no recursion), cached per
+ * directory with the same TTL as fd scans. Used when the user is just browsing
+ * into a directory (empty file query): a full recursive fd scan there is both
+ * unnecessary and the main cause of freezes when navigating into huge trees
+ * (e.g. `@~/` or `@/mnt/e/`). Returns directories with a trailing slash.
+ */
+function listChildren(baseDir: string, ignorePatterns: string[]): string[] {
+	const now = Date.now();
+	const cacheKey = `${baseDir}\0children`;
+	const cached = _fdCache.get(cacheKey);
+	if (cached && cached.expires > now) {
+		return cached.lines;
+	}
+
+	let lines: string[];
+	try {
+		lines = readdirSync(baseDir, { withFileTypes: true })
+			.filter((d) => d.name !== ".git" && !ignorePatterns.includes(d.name))
+			.map((d) => (d.isDirectory() ? `${d.name}/` : d.name));
+	} catch {
+		lines = [];
+	}
+
+	_fdCache.set(cacheKey, { lines, expires: now + FD_CACHE_TTL_MS });
+	return lines;
+}
+
 /** Fuzzy-match a list of paths with fzf --filter, best match first. */
 function runFzf(query: string, files: string[], fzfPath: string): string[] {
 	if (files.length === 0) return [];
@@ -224,9 +252,10 @@ function runFzf(query: string, files: string[], fzfPath: string): string[] {
  * When query is empty, the cached fd listing is returned directly.
  */
 function fzfFilter(query: string, baseDir: string, fdPath: string, fzfPath: string, ignorePatterns: string[]): string[] {
-	const files = listFiles(baseDir, fdPath, ignorePatterns);
-	if (query === "") return files;
-	return runFzf(query, files, fzfPath);
+	// Browsing into a directory (no file query yet): list immediate children
+	// only. Avoids a full recursive scan just to show what's in the directory.
+	if (query === "") return listChildren(baseDir, ignorePatterns);
+	return runFzf(query, listFiles(baseDir, fdPath, ignorePatterns), fzfPath);
 }
 
 /**
